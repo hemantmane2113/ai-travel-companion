@@ -20,7 +20,13 @@ class FixturePlacesProvider implements PlacesProvider {
   }
 }
 
-const DESTINATION = 'delhi';
+// A dedicated destination bucket, not the shared 'delhi' - this test
+// deliberately sits right at the category cap boundary (9 inserted,
+// expect exactly 8 kept), which makes it sensitive to any other
+// concurrently-running test file's 'delhi' rows (Vitest runs test
+// files in parallel by default). `center` still comes from the real
+// Delhi config since only the distance math needs it.
+const DESTINATION = 'delhi-test-candidate-set';
 const { bbox, center } = DESTINATIONS.delhi;
 const TEST_PREFIX = 'test:candidate-set';
 

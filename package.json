@@ -10,15 +10,30 @@
     "migrate": "node-pg-migrate up",
     "migrate:down": "node-pg-migrate down",
     "ingest:places": "tsx src/ingestion/cli.ts",
+    "seed:warnings": "tsx src/advisory/cli.ts",
+    "start:api": "tsx src/main.ts",
+    "start:api:dev": "tsx watch src/main.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
+  "dependencies": {
+    "@nestjs/common": "^12.0.2",
+    "@nestjs/core": "^12.0.2",
+    "@nestjs/platform-express": "^12.0.2",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.14.1",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1"
+  },
   "devDependencies": {
+    "@nestjs/testing": "^12.0.2",
     "@types/node": "^20.14.0",
     "@types/pg": "^8.11.6",
+    "@types/supertest": "^6.0.2",
     "dotenv": "^16.4.5",
     "node-pg-migrate": "^7.6.1",
     "pg": "^8.12.0",
+    "supertest": "^7.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.5.4",
     "vitest": "^2.0.5"

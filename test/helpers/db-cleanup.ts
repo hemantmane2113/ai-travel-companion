@@ -51,3 +51,30 @@ export async function deleteItineraryAndJob(
     await pool.query('delete from itineraries where id = $1', [ids.itineraryId]);
   }
 }
+
+/**
+ * Test-only helper: fully removes a destination row and its warning
+ * facts/fact_versions (destinations.id is referenced by facts.entity_id
+ * with no cascade, so current_version_id must be cleared first).
+ */
+export async function deleteDestination(pool: Pool, slug: string): Promise<void> {
+  const destination = await pool.query('select id from destinations where slug = $1', [slug]);
+  if (destination.rows.length === 0) return;
+  const destinationId = destination.rows[0].id as string;
+
+  await pool.query(
+    `update facts set current_version_id = null
+     where entity_table = 'destinations' and entity_id = $1`,
+    [destinationId],
+  );
+  await pool.query(
+    `delete from fact_versions where fact_id in (
+       select id from facts where entity_table = 'destinations' and entity_id = $1
+     )`,
+    [destinationId],
+  );
+  await pool.query(`delete from facts where entity_table = 'destinations' and entity_id = $1`, [
+    destinationId,
+  ]);
+  await pool.query('delete from destinations where id = $1', [destinationId]);
+}

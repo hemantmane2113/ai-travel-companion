@@ -94,3 +94,48 @@ export async function getItineraryWithProvenance(
     days: resultDays,
   };
 }
+
+/**
+ * The single-item form of the same provenance chain - the literal
+ * `GET /itineraries/:id/items/:itemId/provenance` endpoint plan §5
+ * calls for, rather than requiring a client to fetch and search the
+ * whole itinerary just to answer "why does the system believe this
+ * one thing?"
+ */
+export async function getItemProvenance(
+  pool: Pool,
+  itineraryId: string,
+  itemId: string,
+): Promise<ItineraryItemWithProvenance | null> {
+  const result = await pool.query(
+    `select ii.id as item_id, ii.note, ii.provenance_kind,
+            p.id as place_id, p.name as place_name,
+            s.name as source_name, s.url as source_url, s.licence as source_licence,
+            fv.retrieved_at
+     from itinerary_items ii
+     join itinerary_days d on d.id = ii.itinerary_day_id
+     left join places p on p.id = ii.place_id
+     left join fact_versions fv on fv.id = ii.referenced_fact_version_id
+     left join sources s on s.id = fv.source_id
+     where d.itinerary_id = $1 and ii.id = $2`,
+    [itineraryId, itemId],
+  );
+  if (result.rows.length === 0) return null;
+
+  const row = result.rows[0];
+  return {
+    itemId: row.item_id,
+    placeId: row.place_id,
+    placeName: row.place_name,
+    note: row.note,
+    provenanceKind: row.provenance_kind,
+    source: row.source_name
+      ? {
+          name: row.source_name,
+          url: row.source_url,
+          licence: row.source_licence,
+          retrievedAt: row.retrieved_at,
+        }
+      : null,
+  };
+}

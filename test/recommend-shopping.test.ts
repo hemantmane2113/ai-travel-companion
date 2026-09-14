@@ -20,6 +20,9 @@ class FixturePlacesProvider implements PlacesProvider {
   }
 }
 
+// A dedicated destination bucket, not the shared 'delhi' - see
+// candidate-set.test.ts for why (parallel test-file execution).
+const DESTINATION = 'delhi-test-recommend-shopping';
 const TEST_PREFIX = 'test:recommend-shopping';
 const { bbox, center } = DESTINATIONS.delhi;
 
@@ -44,10 +47,10 @@ const BOOKS: NormalizedPlace = {
 describe('recommendShopping', () => {
   it('is a thin filter over places: no shopType filter returns all shops, ranked by proximity, with provenance', async () => {
     const provider = new FixturePlacesProvider([BOOKS, TEXTILES]);
-    await ingestPlaces(pool, provider, 'delhi', bbox);
+    await ingestPlaces(pool, provider, DESTINATION, bbox);
 
     try {
-      const results = await recommendShopping(pool, 'delhi', center);
+      const results = await recommendShopping(pool, DESTINATION, center);
       const testResults = results.filter((r) => [TEXTILES.name, BOOKS.name].includes(r.name));
 
       expect(testResults).toHaveLength(2);
@@ -62,10 +65,10 @@ describe('recommendShopping', () => {
 
   it('filters by shop type (case-insensitive substring match)', async () => {
     const provider = new FixturePlacesProvider([BOOKS, TEXTILES]);
-    await ingestPlaces(pool, provider, 'delhi', bbox);
+    await ingestPlaces(pool, provider, DESTINATION, bbox);
 
     try {
-      const results = await recommendShopping(pool, 'delhi', center, { shopType: 'book' });
+      const results = await recommendShopping(pool, DESTINATION, center, { shopType: 'book' });
       const testResults = results.filter((r) => [TEXTILES.name, BOOKS.name].includes(r.name));
 
       expect(testResults).toHaveLength(1);

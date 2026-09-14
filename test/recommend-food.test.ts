@@ -20,6 +20,11 @@ class FixturePlacesProvider implements PlacesProvider {
   }
 }
 
+// A dedicated destination bucket, not the shared 'delhi' - avoids
+// collisions (e.g. matching restaurant names) with other test files'
+// concurrently-alive 'delhi' fixture data. `center` still comes from
+// the real Delhi config since only the distance math needs it.
+const DESTINATION = 'delhi-test-recommend-food';
 const TEST_PREFIX = 'test:recommend-food';
 const { bbox, center } = DESTINATIONS.delhi;
 
@@ -44,10 +49,10 @@ const SAGAR_RATNA: NormalizedPlace = {
 describe('recommendFood', () => {
   it('is a thin filter over places: no cuisine filter returns all restaurants, ranked by proximity, with provenance', async () => {
     const provider = new FixturePlacesProvider([SAGAR_RATNA, KARIMS]);
-    await ingestPlaces(pool, provider, 'delhi', bbox);
+    await ingestPlaces(pool, provider, DESTINATION, bbox);
 
     try {
-      const results = await recommendFood(pool, 'delhi', center);
+      const results = await recommendFood(pool, DESTINATION, center);
       const testResults = results.filter((r) => [KARIMS.name, SAGAR_RATNA.name].includes(r.name));
 
       expect(testResults).toHaveLength(2);
@@ -63,10 +68,10 @@ describe('recommendFood', () => {
 
   it('filters by cuisine (case-insensitive substring match)', async () => {
     const provider = new FixturePlacesProvider([SAGAR_RATNA, KARIMS]);
-    await ingestPlaces(pool, provider, 'delhi', bbox);
+    await ingestPlaces(pool, provider, DESTINATION, bbox);
 
     try {
-      const results = await recommendFood(pool, 'delhi', center, { cuisine: 'South' });
+      const results = await recommendFood(pool, DESTINATION, center, { cuisine: 'South' });
       const testResults = results.filter((r) => [KARIMS.name, SAGAR_RATNA.name].includes(r.name));
 
       expect(testResults).toHaveLength(1);
