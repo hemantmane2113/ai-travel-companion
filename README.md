@@ -22,10 +22,12 @@ Phase 1, launch destination: **Delhi**. Done so far:
 - Itinerary persistence and the job lifecycle (`pending → processing →
   complete/failed`), including a provenance query that answers "why does
   the system believe this?" for every itinerary item.
+- Food and Shopping recommendations - thin, proximity-ranked filters over
+  the same `places` table Travel Intelligence uses, each with provenance
+  and an optional cuisine/shop-type filter.
 
-Still to build: seeded warning facts, the HTTP API surface (NestJS
-controllers), and Food/Shopping as thin filters over the existing `places`
-table — see §12 of the architecture plan for progress and what's next.
+Still to build: seeded warning facts and the HTTP API surface (NestJS
+controllers) — see §12 of the architecture plan for progress and what's next.
 
 ## Getting started
 
