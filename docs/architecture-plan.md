@@ -256,14 +256,23 @@ deterministic post-generation validation → persisted itinerary
 ## 11. Remaining Decisions Requiring Approval
 
 1. ~~Hardware for Phase 1 local LLM inference~~ — **Resolved: CPU-only.** Phase 1 default model is 3-4B quantized (§6).
-2. **Phase 1 launch destination** — which single city/region to ingest first (affects which India/global data-source quirks get surfaced first). Still open — needed before the ingestion adapter task.
+2. ~~Phase 1 launch destination~~ — **Resolved: Delhi.**
 3. **Seeded-warning approach for Phase 1** (§9) — confirm that manually-entered warning facts (rather than a live Advisory service) are an acceptable way to prove the "warnings" output type in the first slice.
 4. **Future advisory source priority** (deferred to Phase 2, but worth flagging now) — which source should be treated as primary once the real Advisory service is built.
 
 ---
 
-## 12. First Implementation Task (in progress — see repo root)
+## 12. Implementation Progress
 
-> **Stand up the local dev environment (docker-compose: Postgres+PostGIS, Redis) and implement one migration: the `sources` / `facts` / `fact_versions` schema from §5 — nothing else.** Prove it with a single test that (a) inserts a `source`, (b) inserts a `fact` with an initial `fact_version` pointing at that source, (c) inserts a second `fact_version` for the same fact from a *different* source with a conflicting value, and (d) asserts that `facts.current_version_id` resolves correctly per the priority rule in §5, while the superseded version remains queryable. This single task validates the schema that every later module (Places, Food, Shopping, Travel Intelligence, AI grounding) depends on, before any of them are built.
+**Task 1 (done):** the `sources` / `facts` / `fact_versions` provenance schema. Implemented in `migrations/1700000000000_init-provenance-schema.js`, `src/provenance.ts`, and `test/provenance.test.ts`.
 
-Implemented in `migrations/1700000000000_init-provenance-schema.js`, `src/provenance.ts`, and `test/provenance.test.ts`. See the repo `README.md` for how to run it.
+**Task 2 (done):** the Places domain, end to end for the resolved launch destination (Delhi):
+- `migrations/1700000001000_places-schema.js` — the `places` table (PostGIS `geography(Point)`, category, provider-qualified `external_ref` for idempotent re-ingestion).
+- `src/providers/places-provider.ts` — the `PlacesProvider` interface (plan §8's Provider Abstraction boundary).
+- `src/providers/osm-overpass-adapter.ts` — the OSM Overpass adapter, with normalization (`normalizeOsmElement`) kept as a pure, independently-tested function per the plan's provider-adapter testing strategy.
+- `src/ingestion/ingest-places.ts` — the ingestion pipeline: writes/updates `places`, attaches provenance (`facts`/`fact_versions`, source = OpenStreetMap/Overpass, ODbL licence, attribution required), and correctly chains `superseded_by` on re-ingestion rather than overwriting (proven in `test/ingest-places.test.ts` against a real database, using a fixture provider so CI never depends on a live/rate-limited Overpass call).
+- `src/ingestion/destinations.ts` + `src/ingestion/cli.ts` — the manual ingestion command (`npm run ingest:places -- delhi`), per Phase 1's "no scheduler yet" scope.
+
+This proves the ingestion side of §2's diagram end-to-end for one domain. Food and Shopping (§9) ride on this same `places` table/ingestion pipeline via category filtering — no new provider integration needed for them.
+
+**Next:** Travel Intelligence (deterministic filter/rank over `places`) + AI Orchestration (local `OpenAICompatibleAdapter`) + the itinerary job flow (§9), to close the full Phase 1 vertical slice.

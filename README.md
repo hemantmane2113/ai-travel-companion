@@ -10,9 +10,14 @@ phased roadmap).
 
 ## Status
 
-Phase 0, first task in progress: the provenance foundation schema
-(`sources` / `facts` / `fact_versions`) that every later module (Places,
-Food, Shopping, Travel Intelligence, AI grounding) will depend on.
+Phase 1, launch destination: **Delhi**. Done so far:
+- The provenance foundation schema (`sources` / `facts` / `fact_versions`).
+- The Places domain: an OSM Overpass provider adapter, an ingestion pipeline that
+  normalizes and attaches provenance, and a manual ingestion command.
+
+Food and Shopping (thin filters over `places`) and the Travel Intelligence /
+AI Orchestration / itinerary job flow are next — see §12 of the architecture
+plan for progress and what's next.
 
 ## Getting started
 
@@ -22,9 +27,10 @@ Requires Docker and Node.js 20+.
 cp .env.example .env
 npm install
 
-npm run db:up      # starts Postgres+PostGIS and Redis
-npm run migrate    # applies the provenance schema
-npm test           # runs the conflict-resolution test against real Postgres
+npm run db:up              # starts Postgres+PostGIS and Redis
+npm run migrate            # applies the schema
+npm test                   # runs the test suite against real Postgres
+npm run ingest:places -- delhi   # pulls real Delhi places from OSM Overpass
 ```
 
 To tear down: `npm run db:down`.
