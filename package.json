@@ -1,0 +1,24 @@
+{
+  "name": "ai-travel-companion",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Provenance schema foundation (Phase 0 first task) for the AI Travel Companion.",
+  "scripts": {
+    "db:up": "docker compose up -d postgres redis",
+    "db:down": "docker compose down",
+    "db:wait": "until docker compose exec -T postgres pg_isready -U travel -d travel_companion >/dev/null 2>&1; do sleep 1; done",
+    "migrate": "node-pg-migrate up",
+    "migrate:down": "node-pg-migrate down",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/pg": "^8.11.6",
+    "dotenv": "^16.4.5",
+    "node-pg-migrate": "^7.6.1",
+    "pg": "^8.12.0",
+    "typescript": "^5.5.4",
+    "vitest": "^2.0.5"
+  }
+}
