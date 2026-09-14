@@ -19,10 +19,13 @@ Phase 1, launch destination: **Delhi**. Done so far:
   boundary, defaulting to a local model, with the deterministic
   post-generation grounding check that rejects any place the model
   references but wasn't actually given).
+- Itinerary persistence and the job lifecycle (`pending → processing →
+  complete/failed`), including a provenance query that answers "why does
+  the system believe this?" for every itinerary item.
 
-Still to build: seeded warning facts, the itinerary job persistence/API, and
-Food/Shopping as thin filters over the existing `places` table — see §12 of
-the architecture plan for progress and what's next.
+Still to build: seeded warning facts, the HTTP API surface (NestJS
+controllers), and Food/Shopping as thin filters over the existing `places`
+table — see §12 of the architecture plan for progress and what's next.
 
 ## Getting started
 

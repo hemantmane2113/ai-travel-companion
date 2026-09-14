@@ -34,3 +34,20 @@ export async function deletePlacesByExternalRef(
   );
   await pool.query('delete from places where id = any($1::uuid[])', [ids]);
 }
+
+/**
+ * Test-only helper: removes an itinerary job and its itinerary (days and
+ * items cascade automatically). The job must be deleted first - it has
+ * a non-cascading FK to itineraries.id.
+ */
+export async function deleteItineraryAndJob(
+  pool: Pool,
+  ids: { jobId?: string | null; itineraryId?: string | null },
+): Promise<void> {
+  if (ids.jobId) {
+    await pool.query('delete from itinerary_jobs where id = $1', [ids.jobId]);
+  }
+  if (ids.itineraryId) {
+    await pool.query('delete from itineraries where id = $1', [ids.itineraryId]);
+  }
+}
