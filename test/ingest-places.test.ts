@@ -2,6 +2,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { Pool } from 'pg';
 import { ingestPlaces } from '../src/ingestion/ingest-places';
 import type { BoundingBox, NormalizedPlace, PlacesProvider } from '../src/providers/places-provider';
+import { deletePlacesByExternalRef } from './helpers/db-cleanup';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
@@ -101,12 +102,7 @@ describe('ingestPlaces', () => {
       );
       expect(firstVersionAfter.rows[0].superseded_by).toBe(secondVersionId);
     } finally {
-      // current_version_id must be cleared before fact_versions can be
-      // deleted (facts_current_version_fk).
-      await pool.query('update facts set current_version_id = null where id = $1', [factId]);
-      await pool.query('delete from fact_versions where fact_id = $1', [factId]);
-      await pool.query('delete from facts where id = $1', [factId]);
-      await pool.query('delete from places where id = $1', [placeId]);
+      await deletePlacesByExternalRef(pool, [RED_FORT_REF]);
     }
   });
 });

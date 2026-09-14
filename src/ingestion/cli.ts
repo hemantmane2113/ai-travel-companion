@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import { Pool } from 'pg';
 import { OsmOverpassAdapter } from '../providers/osm-overpass-adapter';
-import { DESTINATIONS } from './destinations';
+import { DESTINATIONS } from '../destinations';
 import { ingestPlaces } from './ingest-places';
 
 /**

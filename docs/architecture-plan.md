@@ -275,4 +275,12 @@ deterministic post-generation validation → persisted itinerary
 
 This proves the ingestion side of §2's diagram end-to-end for one domain. Food and Shopping (§9) ride on this same `places` table/ingestion pipeline via category filtering — no new provider integration needed for them.
 
-**Next:** Travel Intelligence (deterministic filter/rank over `places`) + AI Orchestration (local `OpenAICompatibleAdapter`) + the itinerary job flow (§9), to close the full Phase 1 vertical slice.
+**Task 3 (done):** Travel Intelligence + AI Orchestration, wired to the trust boundary in §7:
+- `src/geo.ts` — the local haversine distance function that replaces a routing-API dependency for V1 (plan §4).
+- `src/destinations.ts` — the Delhi bounding box and reference center, shared by ingestion and Travel Intelligence.
+- `src/travel-intelligence/candidate-set.ts` — the deterministic half: reads only `places`/`facts` (never an external API, never an LLM), filters by destination/category, ranks by proximity to the destination center, and caps each category (context-window discipline, plan §7). Every returned candidate carries the exact `fact_version_id` it came from.
+- `src/ai/llm-provider.ts` + `src/ai/openai-compatible-adapter.ts` + `src/ai/config.ts` — the provider-neutral AI boundary (plan §6): one adapter class speaks the OpenAI Chat Completions format, which a local Ollama server and a future hosted provider both speak, so switching is a config change, not a code change. No hosted/paid provider is a dependency; the adapter's request/response handling is tested against a mocked `fetch`, never a live call.
+- `src/ai/ai-orchestration-service.ts` — assembles the candidate set + trip context into a prompt, calls the configured `LlmProvider`, and applies the plan §7 **deterministic post-generation grounding validation**: every `placeId` the model references must resolve to a candidate actually supplied in context, or it is stripped into `rejectedItems` and never returned as part of the plan. `test/ai-orchestration-service.test.ts` proves this directly — including the case where the model fabricates a `placeId` that doesn't exist.
+- `src/ai/fake-llm-provider.ts` — a deterministic stand-in used only by tests, so the test suite never depends on a live/slow CPU-only local model (plan §6's hardware trade-off).
+
+This closes the "grounded reasoning" half of the Phase 1 exit criteria (§9): real ingested data → deterministic candidate selection → AI reasoning → a validated, hallucination-checked result. **Not yet built:** the seeded-warning facts, the `itineraries`/`itinerary_jobs` persistence and async job flow, and the HTTP API surface tying it all together (plan §9's remaining exit criteria).

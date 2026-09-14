@@ -14,10 +14,15 @@ Phase 1, launch destination: **Delhi**. Done so far:
 - The provenance foundation schema (`sources` / `facts` / `fact_versions`).
 - The Places domain: an OSM Overpass provider adapter, an ingestion pipeline that
   normalizes and attaches provenance, and a manual ingestion command.
+- Travel Intelligence (deterministic candidate selection, ranked by proximity,
+  reading only from Postgres) and AI Orchestration (a provider-neutral LLM
+  boundary, defaulting to a local model, with the deterministic
+  post-generation grounding check that rejects any place the model
+  references but wasn't actually given).
 
-Food and Shopping (thin filters over `places`) and the Travel Intelligence /
-AI Orchestration / itinerary job flow are next — see §12 of the architecture
-plan for progress and what's next.
+Still to build: seeded warning facts, the itinerary job persistence/API, and
+Food/Shopping as thin filters over the existing `places` table — see §12 of
+the architecture plan for progress and what's next.
 
 ## Getting started
 
