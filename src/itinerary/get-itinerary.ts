@@ -1,5 +1,6 @@
 import type { Pool } from 'pg';
 import type { ItineraryItemType } from '../ai/itinerary-plan';
+import type { PlaceCategory } from '../providers/places-provider';
 
 export interface ItineraryItemProvenance {
   name: string;
@@ -8,11 +9,29 @@ export interface ItineraryItemProvenance {
   retrievedAt: string;
 }
 
+/**
+ * The practical "how do I actually get there" fields a traveler needs,
+ * read from the place's own row plus whatever the provider's raw tags
+ * happened to capture at ingestion time (never fetched fresh - same
+ * read-only-Postgres path as everything else). Only present for a
+ * 'place' item; a 'warning' item has no location.
+ */
+export interface ItineraryItemPlaceDetails {
+  category: PlaceCategory;
+  latitude: number;
+  longitude: number;
+  address: string | null;
+  openingHours: string | null;
+  phone: string | null;
+  website: string | null;
+}
+
 export interface ItineraryItemWithProvenance {
   itemId: string;
   itemType: ItineraryItemType;
   placeId: string | null;
   placeName: string | null;
+  place: ItineraryItemPlaceDetails | null;
   note: string;
   provenanceKind: 'verified' | 'ai_inference';
   source: ItineraryItemProvenance | null;
@@ -35,32 +54,76 @@ export interface ItineraryWithProvenance {
 
 const ITEM_SELECT = `
   select ii.id as item_id, ii.item_type, ii.note, ii.provenance_kind,
-         p.id as place_id, p.name as place_name,
+         p.id as place_id, p.name as place_name, p.category as place_category,
+         ST_Y(p.location::geometry) as place_latitude, ST_X(p.location::geometry) as place_longitude,
          s.name as source_name, s.url as source_url, s.licence as source_licence,
-         fv.retrieved_at
+         fv.retrieved_at, fv.value as raw_value
   from itinerary_items ii
   left join places p on p.id = ii.place_id
   left join fact_versions fv on fv.id = ii.referenced_fact_version_id
   left join sources s on s.id = fv.source_id
 `;
 
+/** Composes a best-effort address from whatever addr:* tags the provider captured. */
+function extractAddress(raw: Record<string, unknown>): string | null {
+  const str = (key: string): string | undefined =>
+    typeof raw[key] === 'string' && (raw[key] as string).trim().length > 0
+      ? (raw[key] as string).trim()
+      : undefined;
+
+  const full = str('addr:full');
+  if (full) return full;
+
+  const streetPart = [str('addr:housenumber'), str('addr:street')].filter(Boolean).join(' ');
+  const composed = [streetPart || undefined, str('addr:city'), str('addr:postcode')]
+    .filter(Boolean)
+    .join(', ');
+  return composed.length > 0 ? composed : null;
+}
+
+function extractString(raw: Record<string, unknown>, ...keys: string[]): string | null {
+  for (const key of keys) {
+    const value = raw[key];
+    if (typeof value === 'string' && value.trim().length > 0) return value.trim();
+  }
+  return null;
+}
+
 function toItemWithProvenance(row: {
   item_id: string;
   item_type: ItineraryItemType;
   place_id: string | null;
   place_name: string | null;
+  place_category: PlaceCategory | null;
+  place_latitude: string | null;
+  place_longitude: string | null;
   note: string;
   provenance_kind: 'verified' | 'ai_inference';
   source_name: string | null;
   source_url: string | null;
   source_licence: string | null;
   retrieved_at: string;
+  raw_value: Record<string, unknown> | null;
 }): ItineraryItemWithProvenance {
+  const rawValue = row.raw_value ?? {};
+
   return {
     itemId: row.item_id,
     itemType: row.item_type,
     placeId: row.place_id,
     placeName: row.place_name,
+    place:
+      row.place_id && row.place_category && row.place_latitude !== null && row.place_longitude !== null
+        ? {
+            category: row.place_category,
+            latitude: Number(row.place_latitude),
+            longitude: Number(row.place_longitude),
+            address: extractAddress(rawValue),
+            openingHours: extractString(rawValue, 'opening_hours'),
+            phone: extractString(rawValue, 'phone', 'contact:phone'),
+            website: extractString(rawValue, 'website', 'contact:website'),
+          }
+        : null,
     note: row.note,
     provenanceKind: row.provenance_kind,
     source: row.source_name

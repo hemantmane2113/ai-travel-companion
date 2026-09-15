@@ -67,7 +67,7 @@ in `.env`. No paid API is required for any of this to work.
 | GET | `/health` | Liveness check |
 | POST | `/itineraries` | `{ destinationSlug, interests, startDate, endDate }` → `202 { jobId }`, generation runs in the background |
 | GET | `/itineraries/jobs/:jobId` | Job status: `pending \| processing \| complete \| failed`, plus any grounding-check rejections |
-| GET | `/itineraries/:id` | The generated multi-day itinerary, with provenance on every item (place or warning) |
+| GET | `/itineraries/:id` | The generated multi-day itinerary, with provenance and location/address/opening-hours on every place item (warnings have none) |
 | GET | `/itineraries/:id/items/:itemId/provenance` | "Why does the system believe this?" for one item |
 | GET | `/food?destination=delhi&cuisine=...` | Proximity-ranked food recommendations |
 | GET | `/shopping?destination=delhi&shopType=...` | Proximity-ranked shopping recommendations |

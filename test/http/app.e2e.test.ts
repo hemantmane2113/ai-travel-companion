@@ -175,9 +175,14 @@ describe('HTTP API (end-to-end, real Postgres, fake LLM)', () => {
       );
       expect(placeItem).toBeTruthy();
       expect(warningItem).toBeTruthy();
+      // A traveler needs to know where to actually go.
+      expect(placeItem.place.category).toBe('attraction');
+      expect(typeof placeItem.place.latitude).toBe('number');
+      expect(typeof placeItem.place.longitude).toBe('number');
       // The response makes the warning's source honestly clear - a
       // seeded/static note, never presented as a live advisory.
       expect(warningItem.placeId).toBeNull();
+      expect(warningItem.place).toBeNull();
       expect(warningItem.source.name).toBe('Manually curated Phase 1 seed content');
 
       const provenanceRes = await request(app.getHttpServer()).get(

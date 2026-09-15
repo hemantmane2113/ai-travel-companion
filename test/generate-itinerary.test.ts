@@ -37,7 +37,14 @@ const RED_FORT: NormalizedPlace = {
   category: 'attraction',
   latitude: center.latitude,
   longitude: center.longitude + 0.01,
-  raw: {},
+  raw: {
+    'addr:housenumber': '1',
+    'addr:street': 'Netaji Subhash Marg',
+    'addr:city': 'New Delhi',
+    opening_hours: 'Tu-Su 09:30-16:30',
+    phone: '+91 11 2327 7705',
+    website: 'https://asi.nic.in',
+  },
 };
 
 const KARIMS: NormalizedPlace = {
@@ -119,8 +126,26 @@ describe('generateItinerary', () => {
           expect(item.provenanceKind).toBe('verified');
           expect(item.source?.name).toBe('OpenStreetMap (Overpass)');
           expect(item.source?.licence).toBe('odbl');
+          // A traveler needs to know where to actually go, not just why
+          // the system believes in the recommendation.
+          expect(typeof item.place?.latitude).toBe('number');
+          expect(typeof item.place?.longitude).toBe('number');
         }
       }
+
+      const redFortItem = itinerary!.days[0].items[0];
+      expect(redFortItem.place?.category).toBe('attraction');
+      expect(redFortItem.place?.address).toBe('1 Netaji Subhash Marg, New Delhi');
+      expect(redFortItem.place?.openingHours).toBe('Tu-Su 09:30-16:30');
+      expect(redFortItem.place?.phone).toBe('+91 11 2327 7705');
+      expect(redFortItem.place?.website).toBe('https://asi.nic.in');
+
+      const karimsItem = itinerary!.days[1].items[0];
+      expect(karimsItem.place?.category).toBe('restaurant');
+      // No addr:*/opening_hours/phone/website tags for this fixture -
+      // extraction degrades to null rather than throwing or omitting the key.
+      expect(karimsItem.place?.address).toBeNull();
+      expect(karimsItem.place?.openingHours).toBeNull();
     } finally {
       if (result) await deleteItineraryAndJob(pool, result);
       await deletePlacesByExternalRef(pool, [RED_FORT.externalRef, KARIMS.externalRef]);
@@ -201,6 +226,8 @@ describe('generateItinerary', () => {
       const warningItems = itinerary!.days[0].items.filter((i) => i.itemType === 'warning');
       expect(warningItems).toHaveLength(1);
       expect(warningItems[0].placeId).toBeNull();
+      // A warning has no location - never fabricate a place block for it.
+      expect(warningItems[0].place).toBeNull();
       // The response makes the source honestly clear - not a live advisory.
       expect(warningItems[0].source?.name).toBe('Manually curated Phase 1 seed content');
       expect(warningItems[0].provenanceKind).toBe('verified');
