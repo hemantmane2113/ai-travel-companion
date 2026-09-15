@@ -7,6 +7,7 @@ import {
   Inject,
   NotFoundException,
   Param,
+  ParseUUIDPipe,
   Post,
 } from '@nestjs/common';
 import type { Pool } from 'pg';
@@ -36,9 +37,10 @@ export class ItinerariesController {
    * recorded on the job row by runItineraryJob before it rethrows, so
    * the .catch() here only stops that rethrow from becoming an
    * unhandled promise rejection; it does nothing else. createItineraryJob
-   * itself only throws for bad client input (an unknown destination,
-   * validated before any DB write), so that failure is translated to a
-   * 400 here rather than surfacing as an unhandled 500.
+   * itself only throws for bad client input (an unknown destination or
+   * an invalid trip date range - stabilization P0-4), validated before
+   * any DB write, so that failure is translated to a 400 here rather
+   * than surfacing as an unhandled 500.
    */
   @Post()
   @HttpCode(202)
@@ -56,15 +58,27 @@ export class ItinerariesController {
     return { jobId };
   }
 
+  /**
+   * ParseUUIDPipe validates the param before any handler code runs, so a
+   * malformed id never reaches Postgres as a raw '22P02 invalid input
+   * syntax for type uuid' error surfacing as an unhandled 500 (audit
+   * P0-1) - it's an explicit pipe instance here, not inferred via
+   * emitDecoratorMetadata, so it isn't affected by the same esbuild
+   * metadata gap that broke the automatic body ValidationPipe.
+   */
   @Get('jobs/:jobId')
-  async getJobStatus(@Param('jobId') jobId: string): Promise<ItineraryJobRow> {
+  async getJobStatus(
+    @Param('jobId', ParseUUIDPipe) jobId: string,
+  ): Promise<ItineraryJobRow> {
     const job = await getJob(this.pool, jobId);
     if (!job) throw new NotFoundException('Job not found');
     return job;
   }
 
   @Get(':id')
-  async getItinerary(@Param('id') id: string): Promise<ItineraryWithProvenance> {
+  async getItinerary(
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<ItineraryWithProvenance> {
     const itinerary = await getItineraryWithProvenance(this.pool, id);
     if (!itinerary) throw new NotFoundException('Itinerary not found');
     return itinerary;
@@ -73,8 +87,8 @@ export class ItinerariesController {
   /** "Why does the system believe this?" (plan §5) for one item. */
   @Get(':id/items/:itemId/provenance')
   async getProvenance(
-    @Param('id') id: string,
-    @Param('itemId') itemId: string,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('itemId', ParseUUIDPipe) itemId: string,
   ): Promise<ItineraryItemWithProvenance> {
     const provenance = await getItemProvenance(this.pool, id, itemId);
     if (!provenance) throw new NotFoundException('Itinerary item not found');

@@ -1,6 +1,7 @@
 import type { Pool } from 'pg';
 import type { PlaceCategory } from '../providers/places-provider';
 import { queryPlacesByCategory } from '../places/query-places';
+import { queryWarningCandidates, type WarningCandidate } from './warning-candidates';
 import type { LatLng } from '../geo';
 
 export interface Candidate {
@@ -21,6 +22,9 @@ export interface CandidateSet {
   attractions: Candidate[];
   restaurants: Candidate[];
   shops: Candidate[];
+  /** Stabilization P0-2: warning facts flow through Travel Intelligence
+   * into the AI context the same way places do. */
+  warnings: WarningCandidate[];
 }
 
 // Context-window discipline (plan §7): cap candidate lists rather than
@@ -64,11 +68,12 @@ export async function buildCandidateSet(
   destination: string,
   center: LatLng,
 ): Promise<CandidateSet> {
-  const [attractions, restaurants, shops] = await Promise.all([
+  const [attractions, restaurants, shops, warnings] = await Promise.all([
     rankedCandidates(pool, destination, 'attraction', center),
     rankedCandidates(pool, destination, 'restaurant', center),
     rankedCandidates(pool, destination, 'shop', center),
+    queryWarningCandidates(pool, destination),
   ]);
 
-  return { destination, attractions, restaurants, shops };
+  return { destination, attractions, restaurants, shops, warnings };
 }

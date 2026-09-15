@@ -3,19 +3,22 @@ import { DESTINATIONS, type Destination } from '../destinations';
 import { buildCandidateSet } from '../travel-intelligence/candidate-set';
 import { AiOrchestrationService } from '../ai/ai-orchestration-service';
 import type { LlmProvider } from '../ai/llm-provider';
-import type { DayPlanItem } from '../ai/day-plan';
+import type { GeneratedItineraryItem } from '../ai/itinerary-plan';
+import { parseTripDuration } from './trip-dates';
 import { createJob, markJobComplete, markJobFailed, markJobProcessing } from './jobs';
 import { persistItinerary } from './persist-itinerary';
 
 export interface GenerateItineraryInput {
   destinationSlug: string;
   interests: string[];
+  startDate: string;
+  endDate: string;
 }
 
 export interface GenerateItineraryResult {
   jobId: string;
   itineraryId: string;
-  rejectedItems: DayPlanItem[];
+  rejectedItems: GeneratedItineraryItem[];
 }
 
 function resolveDestination(destinationSlug: string): Destination {
@@ -29,12 +32,13 @@ function resolveDestination(destinationSlug: string): Destination {
 /**
  * Creates the job row and returns its id immediately - the HTTP layer
  * uses this to answer 202 Accepted without waiting for generation (plan
- * §9 step 3). Validates the destination up front so an unknown
- * destination never creates a job at all.
+ * §9 step 3). Validates the destination and trip date range up front so
+ * bad input never creates a job at all (stabilization P0-4).
  */
 export async function createItineraryJob(pool: Pool, input: GenerateItineraryInput): Promise<string> {
   resolveDestination(input.destinationSlug);
-  return createJob(pool, input.destinationSlug, input.interests);
+  parseTripDuration(input.startDate, input.endDate);
+  return createJob(pool, input.destinationSlug, input.interests, input.startDate, input.endDate);
 }
 
 /**
@@ -50,30 +54,36 @@ export async function runItineraryJob(
   llmProvider: LlmProvider,
   jobId: string,
   input: GenerateItineraryInput,
-): Promise<{ itineraryId: string; rejectedItems: DayPlanItem[] }> {
+): Promise<{ itineraryId: string; rejectedItems: GeneratedItineraryItem[] }> {
   const destination = resolveDestination(input.destinationSlug);
+  const { numberOfDays } = parseTripDuration(input.startDate, input.endDate);
 
   try {
     await markJobProcessing(pool, jobId);
 
     const candidateSet = await buildCandidateSet(pool, destination.slug, destination.center);
     const aiService = new AiOrchestrationService(llmProvider);
-    const dayPlanResult = await aiService.generateDayPlan(candidateSet, {
+    const itineraryResult = await aiService.generateItinerary(candidateSet, {
       destination: destination.slug,
       interests: input.interests,
+      numberOfDays,
     });
 
     const itineraryId = await persistItinerary(
       pool,
-      destination.slug,
-      input.interests,
-      dayPlanResult,
+      {
+        destination: destination.slug,
+        interests: input.interests,
+        startDate: input.startDate,
+        endDate: input.endDate,
+      },
+      itineraryResult,
       candidateSet,
     );
 
-    await markJobComplete(pool, jobId, itineraryId, dayPlanResult.rejectedItems);
+    await markJobComplete(pool, jobId, itineraryId, itineraryResult.rejectedItems);
 
-    return { itineraryId, rejectedItems: dayPlanResult.rejectedItems };
+    return { itineraryId, rejectedItems: itineraryResult.rejectedItems };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     await markJobFailed(pool, jobId, message);
