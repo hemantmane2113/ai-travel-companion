@@ -1,6 +1,10 @@
 import type { Candidate, CandidateSet } from '../travel-intelligence/candidate-set';
 import type { WarningCandidate } from '../travel-intelligence/warning-candidates';
 import type { LlmProvider } from './llm-provider';
+import {
+  generateValidatedStructuredOutput,
+  type StructuredGenerationConfig,
+} from './generate-validated-structured-output';
 import type {
   GeneratedItinerary,
   GeneratedItineraryDay,
@@ -119,16 +123,33 @@ function isWellFormedDay(value: unknown): value is GeneratedItineraryDay {
   );
 }
 
+function isWellFormedItinerary(value: unknown): value is GeneratedItinerary {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as GeneratedItinerary;
+  if (typeof candidate.summary !== 'string' || !Array.isArray(candidate.days)) return false;
+  return candidate.days.every(isWellFormedDay);
+}
+
+/** The itinerary-specific config for the generic grounded-generation primitive (§ generate-validated-structured-output.ts). */
+const ITINERARY_GENERATION_CONFIG: StructuredGenerationConfig<GeneratedItinerary, GeneratedItineraryItem> = {
+  isWellFormedOutput: isWellFormedItinerary,
+  isWellFormedItem,
+  extractItems: (parsed) => parsed.days.flatMap((day) => day.items),
+  getFactReferences: (item) => item.factReferences,
+};
+
 /**
- * The only module allowed to call an LLM (plan §6). Applies the
- * deterministic post-generation grounding validation (plan §7,
- * strengthened per stabilization P0-3): every item must reference a
- * real entity (a place in the candidate set, or nothing for a warning)
- * AND every fact_version id it cites must have actually been supplied
- * in context. A "place" item must additionally cite its own
- * fact_version - a pure id-membership check, not prose parsing - so it
- * can't pass by citing an unrelated fact (e.g. a warning's id) instead
- * of the one for the place it's actually about.
+ * The only module allowed to call an LLM (plan §6). Itinerary-specific
+ * caller of the generic grounded-generation primitive (V2 architecture
+ * Phase 1 refactor): owns the itinerary prompt/schema, the exact
+ * day-count enforcement, and the place-specific "must cite its own
+ * fact_version" rule - none of which the generic primitive knows about.
+ * The primitive itself already applies the fact-reference-membership
+ * check (plan §7, strengthened per stabilization P0-3); this class
+ * layers the place-ownership rule on top - a pure id-membership check,
+ * not prose parsing - so a place item can't pass by citing an unrelated
+ * fact (e.g. a warning's id) instead of the one for the place it's
+ * actually about.
  */
 export class AiOrchestrationService {
   constructor(private readonly provider: LlmProvider) {}
@@ -138,74 +159,48 @@ export class AiOrchestrationService {
     context: TripContext,
   ): Promise<ItineraryResult> {
     const userPrompt = buildUserPrompt(candidateSet, context);
-    const { text } = await this.provider.generate(SYSTEM_PROMPT, userPrompt);
+    const suppliedFactVersionIds = allSuppliedFactVersionIds(candidateSet);
 
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      throw new Error('LLM response was not valid JSON');
-    }
+    const { parsed, groundedItems, rejectedItems } = await generateValidatedStructuredOutput(
+      this.provider,
+      SYSTEM_PROMPT,
+      userPrompt,
+      suppliedFactVersionIds,
+      ITINERARY_GENERATION_CONFIG,
+    );
 
-    if (
-      typeof parsed !== 'object' ||
-      parsed === null ||
-      typeof (parsed as GeneratedItinerary).summary !== 'string' ||
-      !Array.isArray((parsed as GeneratedItinerary).days)
-    ) {
-      throw new Error('LLM response did not match the expected schema');
-    }
-
-    const candidate = parsed as GeneratedItinerary;
-
-    if (!candidate.days.every(isWellFormedDay)) {
-      throw new Error('LLM response did not match the expected schema');
-    }
-    if (candidate.days.length !== context.numberOfDays) {
+    if (parsed.days.length !== context.numberOfDays) {
       throw new Error(
-        `LLM response contained ${candidate.days.length} day(s), expected ${context.numberOfDays}`,
+        `LLM response contained ${parsed.days.length} day(s), expected ${context.numberOfDays}`,
       );
     }
 
     const placesById = new Map(allPlaceCandidates(candidateSet).map((c) => [c.placeId, c]));
-    const suppliedFactVersionIds = allSuppliedFactVersionIds(candidateSet);
-    const rejected: GeneratedItineraryItem[] = [];
+    const rejected = [...rejectedItems];
 
-    const groundedDays: GeneratedItineraryDay[] = candidate.days.map((day) => {
-      const groundedItems: GeneratedItineraryItem[] = [];
-
-      for (const item of day.items) {
-        if (!isWellFormedItem(item)) {
-          // Structurally invalid - never carried a factual claim to
-          // catch in the first place, so it's dropped, not "rejected".
-          continue;
-        }
-
-        const factsExist = item.factReferences.every((id) => suppliedFactVersionIds.has(id));
-        if (!factsExist) {
-          rejected.push(item);
-          continue;
-        }
+    const groundedDays: GeneratedItineraryDay[] = parsed.days.map((day) => {
+      const groundedDayItems = day.items.filter(isWellFormedItem).filter((item) => {
+        if (!groundedItems.has(item)) return false;
 
         if (item.itemType === 'place') {
           const place = item.placeId ? placesById.get(item.placeId) : undefined;
           const citesOwnFact = place ? item.factReferences.includes(place.factVersionId) : false;
           if (!place || !citesOwnFact) {
             rejected.push(item);
-            continue;
+            return false;
           }
         }
         // 'warning' items: existence of the fact_version was already
-        // confirmed by factsExist - no separate placeId to check.
+        // confirmed by the generic primitive - no separate placeId to check.
 
-        groundedItems.push(item);
-      }
+        return true;
+      });
 
-      return { dayNumber: day.dayNumber, summary: day.summary, items: groundedItems };
+      return { dayNumber: day.dayNumber, summary: day.summary, items: groundedDayItems };
     });
 
     return {
-      itinerary: { summary: candidate.summary, days: groundedDays },
+      itinerary: { summary: parsed.summary, days: groundedDays },
       rejectedItems: rejected,
     };
   }
