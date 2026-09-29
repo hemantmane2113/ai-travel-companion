@@ -8,6 +8,20 @@ in the actual current repository (NestJS, no Next.js app present,
 Postgres+PostGIS, provenance chain, itinerary generation, grounding
 validator, Redis provisioned but unused, 58 tests).
 
+**Revision 2** (this version): incorporates five refinements from a
+stress-test review against all 14 representative product queries: (1)
+entity/reference resolution elevated to a named Supervisor responsibility
+with a mandatory clarify-don't-guess rule, (2) Comparison Agent's `domain`
+parameter changed from a single value to a set (one request can compare
+hotels/flights/trains/buses simultaneously), (3) the fifth agent renamed
+back to **Booking Management / Cancellation Agent** with an explicit
+modify (native or cancel+rebook composite) workflow, (4) cancellation-policy
+lookup split out as a standalone tool usable outside an active
+cancellation, (5) provider-side booking idempotency (client idempotency
+key + mandatory status-check before any retry). None of these change the
+agent count, the data model, or the phased plan — they refine boundaries
+within the same design.
+
 ---
 
 ## A. Final architecture overview
@@ -22,14 +36,15 @@ validator, Redis provisioned but unused, 58 tests).
                                 |
                                 v
                      SUPERVISOR AGENT (new)
-        classify intent -> route -> maintain task state ->
-        enforce confirmation boundary -> compose response
+   resolve entity refs -> classify intent -> route ->
+   maintain task state -> enforce confirmation boundary ->
+   compose response  (ask user to clarify, never guess)
                                 |
         +----------+-----------+-----------+-----------+
         |          |           |           |           |
         v          v           v           v           v
-   Q&A tool   Planning     Comparison   Booking     Cancellation
-  (capability)  Agent        Agent       Agent          Agent
+   Q&A tool   Planning     Comparison   Booking    Booking Mgmt /
+  (capability)  Agent    (multi-domain)   Agent    Cancellation
         |          |           |           |           |
         +----------+-----------+-----------+-----------+
                                 |
@@ -63,7 +78,7 @@ by the Supervisor instead of by the HTTP controller directly.
 | HTTP | `ItinerariesController`, `/food`, `/shopping`, `/advisories` | **Keep**, become secondary/direct routes; primary traffic moves to the new companion endpoint |
 | HTTP | Companion endpoint | **New** |
 | Orchestration | `AiOrchestrationService.generateItinerary()` | **Refactor**: split into (1) a generic "call model → parse → validate against supplied facts" primitive, (2) the Planning Agent's own prompt/schema |
-| Orchestration | Supervisor, Planning, Comparison, Booking, Cancellation agents | **New** |
+| Orchestration | Supervisor, Planning, Comparison, Booking, Booking Management/Cancellation agents | **New** |
 | Reasoning | Travel Intelligence (`candidate-set.ts`, `query-places.ts`, `warning-candidates.ts`) | **Keep + generalize**: made independently callable outside the itinerary job |
 | Grounding | Deterministic validator pattern in `AiOrchestrationService` | **Keep + generalize** to comparison/booking narrative |
 | Data | provenance chain (`sources`/`facts`/`fact_versions`) | **Keep as-is** |
@@ -119,14 +134,48 @@ listed in your prompt:
 | Planning Agent | **Yes** | Genuinely multi-step: gather candidates, allocate days, generate narrative, validate, persist. Already exists in spirit as `generate-itinerary.ts`. |
 | Research / Q&A | **No — a capability/tool path**, not an agent | CLAUDE.md's own §5.3 heading already says "Capability," not "Agent." One retrieval call + one LLM synthesis call, invoked directly by the Supervisor. No multi-step loop needed for "what should I eat here?" |
 | Hotel Comparison Agent | **Merged into one Comparison Agent** (see below) | |
-| Flight/Train/Bus Comparison Agents | **Merged into the same Comparison Agent**, parametrized by domain | Search→normalize→compare is the *same workflow shape* for hotels, flights, trains, buses — only the provider adapter set differs. Three-to-four near-identical agents is exactly the anti-pattern §19 warns against. One `ComparisonAgent(domain, providers[])` replaces all of §5.4+§5.5. |
+| Flight/Train/Bus Comparison Agents | **Merged into the same Comparison Agent**, parametrized by a domain **set** | Search→normalize→compare is the *same workflow shape* for hotels, flights, trains, buses — only the provider adapter set differs. Three-to-four near-identical agents is exactly the anti-pattern §19 warns against. One `ComparisonAgent(domains: Domain[], providers[])` replaces all of §5.4+§5.5, and handles a single request spanning multiple domains at once (query 7) without needing a coordinating meta-agent. |
 | Restaurant/Food Agent | **No — a tool/capability**, not an agent | No multi-provider price comparison exists for restaurants today (unlike hotels/flights); it's single-source ranked recommendation, i.e. exactly what `recommend-food.ts` already is. Stays a tool the Supervisor or Planning Agent calls directly. If real reservation-platform integration arrives later, "restaurant" becomes one more domain the Booking Agent parametrizes over — still no new agent. |
 | Booking Agent | **Yes**, one agent parametrized by domain (hotel/flight/train/bus/restaurant) | Workflow shape (prepare→show→confirm→execute→verify→persist) is identical across domains; only the `ProviderAdapter` differs. |
-| Booking Management / Cancellation Agent | **Yes, separate from Booking** | Different trigger, different policy lookups (refund/fee), different state transitions (unwind vs. commit). CLAUDE.md itself keeps these as separate headings (§5.7 vs §5.8) for the same reason. |
+| Booking Management / Cancellation Agent | **Yes, separate from Booking** | Different trigger, different policy lookups (refund/fee), different state transitions (unwind vs. commit), **plus modification** (native provider `modify()`, or a Supervisor-coordinated cancel+rebook composite — see §I). CLAUDE.md itself keeps these as separate headings (§5.7 vs §5.8) for the same reason, and names "modification" explicitly under §5.8. |
 
 **Final count: 5 real agents** — Supervisor, Planning, Comparison,
-Booking, Cancellation. Everything else (Q&A, restaurant discovery, Travel
-Intelligence) is a tool or deterministic service the agents call.
+Booking, **Booking Management / Cancellation**. Everything else (Q&A,
+restaurant discovery, Travel Intelligence, cancellation-policy lookup) is
+a tool or deterministic service the agents call.
+
+### Supervisor: entity/reference resolution (new — first-class responsibility)
+
+Before intent routing runs, the Supervisor resolves any reference in the
+incoming message to something concrete from the active conversation's
+open task — "the second one," "this hotel," "the cheaper one," "the train
+I selected," "my hotel booking." This is not a side effect of routing; it
+is its own explicit step, because getting it wrong (silently guessing the
+wrong offer or booking) is a direct hallucination-adjacent safety issue,
+not just a UX nicety.
+
+**Resolution order, deterministic-first:**
+
+1. **Clean ordinal/positional reference** ("the second one," "the first
+   option") — resolved by a pure array-index lookup into the persisted,
+   domain-tagged offer list on `tasks.result`. **Zero LLM calls.**
+2. **Attribute-filtered reference** ("the cheaper one," "the one near
+   Karol Bagh," "the train") — resolved by a deterministic filter over the
+   same persisted list's structured fields (price, location, `domain`).
+   **Zero LLM calls** when the filter maps directly onto a stored field.
+3. **Genuinely free-text reference** that doesn't reduce to (1) or (2) —
+   the LLM is used *only* to parse the reference into an index/filter
+   against the already-persisted list; it is never used to recall or
+   reconstruct what the offer/booking actually was.
+4. **Ambiguous or zero-match** (the reference could mean more than one
+   persisted item, or matches none) — the Supervisor **must ask the user
+   a clarifying question** ("Did you mean the Agoda hotel or the
+   MakeMyTrip one?"). **It never guesses**, and it never silently falls
+   back to "the most recent thing mentioned" as a default.
+
+This same mechanism resolves "my hotel booking" (query 11) against
+`bookings` filtered by user + active status, and "the Agoda option" (query
+8) against a `provider` field on the persisted comparison result.
 
 ### Responsibility split (per CLAUDE.md §3, made concrete)
 
@@ -156,9 +205,10 @@ tool in the system."
 | `recommendFood` / `recommendShopping` | existing, unchanged | Q&A, Planning |
 | `retrieveKnowledge(query)` | **new**, RAG (§ RAG below) | Q&A, Planning (visa/advisory questions) |
 | `searchHotels(criteria)` | **new**, calls `HotelProvider` adapters in parallel | Comparison |
-| `searchTransport(criteria, mode)` | **new**, calls `TransportProvider` adapters | Comparison |
-| `prepareBooking(offerId)` / `executeBooking(...)` | **new** | Booking |
-| `getBookingPolicy(bookingId)` / `executeCancellation(...)` | **new** | Cancellation |
+| `searchTransport(criteria, domains: TransportDomain[])` | **new**, fans out to `{Flight,Train,Bus}Provider` adapters in parallel per requested domain, independent per-domain timeout, partial results on a domain/provider failure | Comparison |
+| `prepareBooking(offerId)` / `executeBooking(...)` | **new**, `executeBooking` accepts/generates a client idempotency key (§I) | Booking |
+| `getCancellationPolicy(offerRef \| bookingRef)` | **new, standalone** — reads a structured field off a `NormalizedOffer`/`bookings` row directly when present; falls back to `retrieveKnowledge` (RAG) only for unstructured terms documents | **Q&A** (informational, e.g. query 14) **and** Booking Management/Cancellation (internal step) |
+| `executeCancellation(...)` / `modifyBooking(...)` | **new** — `modifyBooking` tries a provider-native `modify()` first, else the Supervisor composes cancel+rebook (§I) | Booking Management/Cancellation |
 | generic structured-generation primitive (extracted from `AiOrchestrationService`) | **refactor** | every agent's "narrate/synthesize" step |
 
 ---
@@ -173,8 +223,16 @@ different safety, idempotency, and error-handling requirements:
 ```text
 ReadProvider<T>            WriteProvider<T>
   search(criteria)            prepare(offer) -> hold/quote
-  -> normalized offers[]      execute(preparedBooking) -> confirmation
+  -> normalized offers[]      execute(preparedBooking, idempotencyKey)
+                                 -> confirmation | already-executed (§I)
                                cancel(bookingRef) -> cancellation result
+                               modify?(bookingRef, changes) -> new state
+                                 (optional — only if the provider supports
+                                 native modification; absent otherwise,
+                                 never assumed)
+                               getStatus(bookingRef) -> current state
+                                 (used to resolve an ambiguous/timed-out
+                                 execute before any retry — §I)
 ```
 
 ```text
@@ -238,7 +296,7 @@ Being explicit, per your instruction not to call every LLM call an
 | Layer | What it is | Where used |
 |---|---|---|
 | **LLM reasoning** | A single, stateless model call with a constrained prompt and a JSON schema it must match | Intent classification (fallback only, see below), itinerary narrative, comparison explanation, Q&A answer synthesis |
-| **Agent orchestration** | Deciding *which* tools to call, *in what order*, and whether to ask the user something — implemented as plain TypeScript control flow, not an LLM free-reasoning loop | Supervisor, Planning, Comparison, Booking, Cancellation |
+| **Agent orchestration** | Deciding *which* tools to call, *in what order*, and whether to ask the user something — implemented as plain TypeScript control flow, not an LLM free-reasoning loop | Supervisor, Planning, Comparison, Booking, Booking Management/Cancellation |
 | **Deterministic business logic** | Travel Intelligence: filtering, ranking, distance, feasibility, budget math | Called *by* agents, never replaced by them |
 | **Tools** | Typed functions wrapping the above, plus provider adapters and retrieval | Called by agents |
 | **External providers** | Real/sandboxed/mocked systems behind `ReadProvider`/`WriteProvider` | Called only by tools/adapters, never directly by an agent or the LLM |
@@ -247,8 +305,11 @@ Being explicit, per your instruction not to call every LLM call an
 
 ```text
 Supervisor Agent
+   -> resolves entity/reference to the active task, if any (deterministic-
+      first, clarifying question on ambiguity — never a guess)
    -> classifies intent (mostly deterministic, LLM fallback for ambiguity)
-   -> selects: Q&A tool | Planning Agent | Comparison Agent | Booking Agent | Cancellation Agent
+   -> selects: Q&A tool | Planning Agent | Comparison Agent (domain set)
+      | Booking Agent | Booking Management/Cancellation Agent
         -> agent calls Travel Intelligence / retrieval / provider adapters (tools)
              -> deterministic results come back
         -> agent makes ONE LLM call to narrate/synthesize over those results
@@ -315,14 +376,14 @@ re-verified" for a live offer — the UI/response should say which.
 
 ---
 
-## I. Booking / cancellation architecture
+## I. Booking / cancellation / modification architecture
 
 ```text
 search -> compare -> user selects -> prepare booking
   -> show final price/details (re-verify against provider, since time
      has passed since compare)
   -> explicit user confirmation (deterministic check, see below)
-  -> Booking Agent -> Provider Adapter (write)
+  -> Booking Agent -> Provider Adapter (write, with idempotency key)
   -> provider confirmation
   -> persist booking + booking_event
   -> return confirmation
@@ -338,14 +399,73 @@ re-verifies price/availability with the provider; if it changed, the flow
 returns to "show final details" rather than silently booking something
 different from what was confirmed.
 
-Cancellation follows the mirror flow (§CLAUDE.md §14), with the same
+Cancellation follows the mirror flow (§CLAUDE.md §14), driven by the
+**Booking Management / Cancellation Agent**, with the same
 deterministic-confirmation discipline, and the database is never updated
 to `cancelled` until the provider confirms.
 
-**Idempotency:** booking execution is guarded by a DB-level conditional
-transition (`awaiting_confirmation → executing`, only once) keyed on the
-task id, preventing a double-click or retried request from creating two
-bookings.
+### Idempotency (our side + provider side)
+
+Two distinct failure modes, two distinct guards:
+
+1. **Our side — a double-click or retried client request.** Booking
+   execution is guarded by a DB-level conditional transition
+   (`awaiting_confirmation → executing`, only once) keyed on the task id.
+   A second concurrent request against the same task finds zero rows
+   updated and no-ops.
+2. **Provider side — the write call itself times out.** This is a
+   *different* problem: our own DB guard already stopped a double
+   *invocation*, but the provider call's outcome is now genuinely
+   unknown — it may have booked, may not have. `executeBooking` always
+   generates (or reuses, on a retried task) a client idempotency key and
+   passes it to the provider where the provider API supports one. **On a
+   timeout or ambiguous response, the Booking Agent never blindly
+   retries the write.** It first calls `getStatus(bookingRef |
+   idempotencyKey)` against the provider; only once the provider
+   confirms the original attempt did *not* go through does it retry —
+   with the same idempotency key, not a new one. The idempotency key and
+   the resulting execution state (`unknown`/`confirmed`/`not-executed`)
+   are recorded on the `bookings`/`tasks` row, not just implied by
+   whatever the last HTTP response happened to say.
+
+### Modification (new — the composite workflow)
+
+"I changed my dates — modify/cancel the relevant bookings" is not plain
+cancellation. The Booking Management / Cancellation Agent handles it as:
+
+```text
+identify existing booking
+  -> does the provider adapter implement modify()?
+       YES -> call it directly -> provider confirms new state
+              -> persist + booking_event -> done
+       NO  -> composite workflow, coordinated by the SUPERVISOR
+              (not by the agent itself, to keep the agent's own
+              scope bounded to one domain's write operation):
+                1. Booking Management Agent: look up cancellation
+                   consequences (refund/fee) for the existing booking
+                   -- does not execute yet
+                2. Comparison Agent (search only, not a full comparison
+                   turn) or Booking Agent's own prepare step: get a
+                   fresh price quote for the equivalent new-dates offer
+                   -- does not execute yet. Exactly one of these owns
+                   this step per implementation (decided in Phase 9,
+                   not this document) -- it is never done twice.
+                3. Supervisor presents BOTH together as ONE combined
+                   confirmation: "cancelling costs you ₹X (fee/refund
+                   delta), the new dates cost ₹Y — net ₹Z. Confirm?"
+                4. ONLY on that single explicit confirmation:
+                   Booking Management Agent executes the cancellation,
+                   THEN Booking Agent executes the new booking
+                5. persist both booking_events; if step 4's rebooking
+                   fails after the cancellation already succeeded, the
+                   user is told plainly (never silently) and the
+                   conversation is left in a state a human can resolve
+```
+
+**Never two independent confirmations for one user-requested
+modification** — a user who confirms "yes, cancel" without knowing the
+rebooking costs ₹8,000 more has not actually confirmed the modification
+they asked for.
 
 ---
 
@@ -359,12 +479,14 @@ bookings.
 | Booking state | Actual external commitments | `bookings` + `booking_events` |
 
 **Resolving "I like the second one":** the ordered offer list from the
-comparison result is persisted verbatim in `tasks.result` (not
-re-derived). The Supervisor resolves an ordinal/descriptive reference
-("second one," "the cheaper one," "the one near Karol Bagh") against that
-persisted list — using the LLM only to *parse* the reference into an
-index/filter, never to *recall* what the offer was. This is a deliberate
-fix for the exact hallucination risk multi-turn selection creates.
+comparison result is persisted verbatim in `tasks.result`, **each item
+tagged with its `domain`/`provider`** (not re-derived) — this is what
+lets "the train I selected" (query 10) disambiguate correctly even when
+the same task's list also contains flights and buses, from a
+multi-domain comparison (§E). Resolution mechanics are the Supervisor's
+responsibility, detailed in §C — deterministic index/attribute lookup
+first, LLM parse-only as a fallback, explicit clarifying question on
+ambiguity, never a guess.
 
 **Context-window discipline:** the prompt sent to the model on any turn is
 built from a bounded recent-message window plus a rolling summary of
@@ -395,10 +517,12 @@ must-include constraints; Travel Intelligence, not the LLM, guarantees
 they appear.
 
 **4. "Compare hotels near Karol Bagh."**
-Supervisor → Comparison Agent (domain=hotel) → parallel `HotelProvider`
-adapter calls (`Promise.allSettled`, per-provider timeout) → normalize →
-persist `hotel_offers` under a new task → one LLM explanation call →
-response. Task stays `awaiting_selection`.
+Supervisor → Comparison Agent, invoked with `domain: ['hotel']` (a
+single-element set — the same call shape example 7 uses with three) →
+parallel `HotelProvider` adapter calls (`Promise.allSettled`,
+per-provider timeout) → normalize → persist `hotel_offers` under a new
+task → one LLM explanation call → response. Task stays
+`awaiting_selection`.
 
 **5. "I like the second one." → "Book it through Agoda."**
 Supervisor loads the open task, resolves "second one" against the
@@ -408,10 +532,43 @@ confirmation** invokes Booking Agent → Agoda write adapter → provider
 confirmation → persist `bookings`/`booking_events` → confirmation message.
 
 **6. "Cancel my hotel. I found a cheaper one."**
-Supervisor → Cancellation Agent → looks up the existing `bookings` row →
-provider policy lookup (refund/fee) → presents consequences → explicit
-confirmation → provider cancel call → update `bookings`/`booking_events`
+Supervisor → entity resolution ("my hotel" against `bookings`, zero or
+one match — clarify if more than one) → Booking Management/Cancellation
+Agent → `getCancellationPolicy` (structured field on the booking, no RAG
+needed) → presents consequences → explicit confirmation → provider
+cancel call (with idempotency key) → update `bookings`/`booking_events`
 only after provider confirms.
+
+**7. "Compare flights, trains and buses from Pune to Delhi."**
+Supervisor → Comparison Agent invoked **once** with `domain: ['flight',
+'train', 'bus']` → `searchTransport` fans out to all three provider
+families in parallel, each with its own timeout → results merged into one
+domain-tagged offer list, persisted to `tasks.result` → if, say, the bus
+provider times out, the response still returns flight+train results with
+a note that bus results are unavailable, rather than failing the whole
+comparison.
+
+**8. "Book the train I selected."**
+Supervisor resolves "the train" against the domain-tagged list from
+example 7 (filters to `domain='train'`, then the prior selection/ordinal)
+→ same prepare→revalidate→confirm→execute flow as example 5, with the
+`TrainProvider` write adapter.
+
+**9. "I changed my travel dates. Modify/cancel the relevant bookings."**
+Supervisor → Booking Management/Cancellation Agent checks for a native
+`modify()` on the existing booking's provider; if absent, the Supervisor
+runs the cancel+rebook composite from §I — cancellation consequences and
+new-dates price gathered *without executing either*, presented as one
+combined confirmation, and only on that single confirmation are both
+operations executed in sequence.
+
+**10. "What is the cancellation policy for this hotel?"**
+Supervisor (deterministic router: no "cancel my booking," this is a
+question, not an action) → Q&A path → `getCancellationPolicy` called
+directly (not via the Booking Management Agent, since there's no booking
+to cancel yet) → reads the structured field off the relevant
+`NormalizedOffer`/`bookings` row if one is in context, else RAG only if
+the terms require document-level detail → answer.
 
 ---
 
@@ -424,8 +581,11 @@ only after provider confirms.
 | Local CPU model reliability for structured tool-calling | Keep tool selection mostly deterministic (router), not LLM-driven; the LLM only ever narrates over an already-fetched, already-validated candidate set — same posture that already works for itinerary generation today |
 | Provider rate limits / failures | `Promise.allSettled` + per-provider timeout + partial-result handling (already required by §19); adapter-level backoff/circuit-breaking |
 | Comparison normalization drift | Each adapter is solely responsible for mapping into the canonical offer shape; a validation step rejects malformed normalized offers before the LLM sees them |
-| Stale offers / booking races / duplicate bookings | Re-verify price/availability at confirm time, not just compare time; DB-level conditional state transition keyed on task id prevents double-execution |
+| Stale offers / booking races / duplicate bookings (our side) | Re-verify price/availability at confirm time, not just compare time; DB-level conditional state transition keyed on task id prevents double-execution |
+| **Duplicate bookings (provider side, ambiguous timeout on the write call)** | **New (§I)**: client idempotency key passed to the provider where supported; on timeout/ambiguous response, a mandatory `getStatus` check before ever retrying — never a blind retry of a write |
 | Cancellation races | Same state-machine discipline: mutations to a `bookings` row are guarded by its current status, not read-then-write |
+| **Entity-reference ambiguity** ("this hotel" with no clear antecedent, or matching more than one persisted item) | **New (§C)**: the Supervisor's deterministic resolution asks a clarifying question on zero or multiple matches — it never guesses or defaults to "most recent" |
+| **Multi-domain comparison fan-out cost** (query 7 — three provider families in one request) | **New (§E/§K)**: per-domain timeout is independent, so one slow domain never blocks the others; partial results returned with an explicit note on what's missing |
 | Hallucination / provenance gaps | Generalized grounding validator: numeric/status claims always come from the deterministic object, never the LLM's own text |
 | Long-running / infinite tool loops | Hard cap on tool-calls per task turn (e.g. 5–6) with a deterministic fallback response if exceeded |
 | Retry storms | Exponential backoff + max-retry cap per provider adapter |
@@ -476,9 +636,11 @@ something this document decides today.
 | `candidate-set.ts` | **GENERALIZE**: callable standalone, not itinerary-only |
 | grounding validator pattern | **GENERALIZE**: to comparison/booking narrative |
 | job/async 202-poll pattern | **GENERALIZE**: to `tasks` (new types), `itinerary_jobs` stays as-is for now |
-| Supervisor, Planning(wrapper), Comparison, Booking, Cancellation agents | **ADD** |
+| Supervisor, Planning(wrapper), Comparison (multi-domain), Booking, Booking Management/Cancellation agents | **ADD** |
+| Supervisor entity/reference resolution step | **ADD** (§C) |
 | `conversations`/`messages`/`tasks`/`hotel_offers`/`transport_offers`/`bookings`/`booking_events`/`provider_operations` | **ADD** |
-| Hotel/Transport/Booking provider interfaces + adapters | **ADD** |
+| Hotel/Transport/Booking provider interfaces + adapters (incl. optional `modify()`/`getStatus()`) | **ADD** |
+| `getCancellationPolicy` standalone tool | **ADD** (§D) |
 | RAG (`knowledge_documents` + tsvector retrieval) | **ADD** |
 | Next.js frontend | **DEFER** (after Phase 3) |
 | Redis usage | **DEFER** (until Phase 5+, rate-limiting/provider concurrency) |
@@ -497,12 +659,12 @@ something this document decides today.
 | **1** | Extract the generic validated-generation primitive from `AiOrchestrationService`; make `buildCandidateSet` standalone-callable. No behavior change. | Refactor is safe; all 58 tests still pass |
 | **2** | `conversations`/`messages`/`tasks` tables. New companion endpoint. Minimal Supervisor: deterministic router with exactly two routes — "full trip" (→ existing Planning path, unchanged) and "everything else" (→ new Q&A tool path, no persistence beyond message log). | **The smallest change that proves the new architecture end-to-end** — see below |
 | **3** | Formalize Supervisor + Planning Agent as named modules (`src/agents/`). Add must-visit-place constraint handling to Planning. | Supervisor calling a real multi-step agent, not just a stub |
-| **4** | Comparison Agent + `HotelProvider` interface + one real-or-mocked hotel adapter + `hotel_offers`. | First provider abstraction beyond Places; first "compare" workflow |
-| **5** | Redis introduced for provider-call rate-limiting/concurrency control. Extend Comparison Agent to transport (flight/train/bus), sharing the same agent. | Redis earns its keep with a measured need, not speculatively |
-| **6** | RAG (`knowledge_documents` + tsvector) wired into Q&A for visa/advisory questions. | First non-structured-DB knowledge source |
-| **7** | Booking preparation + confirmation boundary (no real provider write yet — stop at "prepared, awaiting confirmation"). | Confirmation-boundary logic provably correct before any money-adjacent call exists |
-| **8** | Booking Agent executes through a real/sandbox provider write adapter. `bookings`/`booking_events`. | Full search→compare→select→confirm→book→persist loop |
-| **9** | Cancellation Agent. | Mirror flow, provider-confirmed state transitions |
+| **4** | Comparison Agent (built domain-set-first from the start, per §E, even though only `HotelProvider` exists yet) + one real-or-mocked hotel adapter + `hotel_offers`. Supervisor entity-resolution step (§C) added here — needed as soon as a comparison result exists to select from. | First provider abstraction beyond Places; first "compare" workflow; first multi-turn selection |
+| **5** | Redis introduced for provider-call rate-limiting/concurrency control. Extend Comparison Agent's existing domain-set support to transport (flight/train/bus adapters) — no interface change, just more domains registered. `getCancellationPolicy` added as a standalone tool. | Redis earns its keep with a measured need; multi-domain comparison (query 7) proven end-to-end |
+| **6** | RAG (`knowledge_documents` + tsvector) wired into Q&A for visa/advisory questions and as `getCancellationPolicy`'s fallback for unstructured terms. | First non-structured-DB knowledge source |
+| **7** | Booking preparation + confirmation boundary + idempotency-key plumbing (no real provider write yet — stop at "prepared, awaiting confirmation"). | Confirmation-boundary and idempotency logic provably correct before any money-adjacent call exists |
+| **8** | Booking Agent executes through a real/sandbox provider write adapter, with idempotency key + `getStatus` reconciliation on ambiguous responses. `bookings`/`booking_events`. | Full search→compare→select→confirm→book→persist loop, safe under retry |
+| **9** | Booking Management / Cancellation Agent: pure cancellation first, then the modify composite workflow (native `modify()` or Supervisor-coordinated cancel+rebook with one combined confirmation). | Mirror flow, provider-confirmed state transitions, modify workflow |
 | **10** | Next.js frontend begins (per frontend decision above). Auth/`users` hardened. Observability, provider expansion, stuck-job reconciliation sweep. | Productionization |
 
 At every phase: run the existing 58 tests + typecheck, add tests for new
@@ -540,7 +702,10 @@ before any new agent code exists.
 
 ---
 
-*Waiting for your review/approval of this document — and specifically the
-open judgment calls flagged inline (frontend timing, agent-count decisions
-in §C, RAG storage choice, Redis deferral, offer-provenance split in §H)
-— before any implementation begins.*
+*This revision incorporates the five refinements from the stress-test
+review (entity resolution, multi-domain Comparison Agent, Booking
+Management/Cancellation Agent + modify workflow, standalone
+cancellation-policy tool, provider-side idempotency). Remaining judgment
+calls carried over unchanged from Revision 1 (frontend timing, RAG
+storage choice, Redis deferral, offer-provenance split in §H) still stand
+as documented. Waiting for final go-ahead before Phase 1 begins.*
