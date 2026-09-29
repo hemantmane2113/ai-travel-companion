@@ -1,6 +1,7 @@
 import type { Pool } from 'pg';
 import { DESTINATIONS, type Destination } from '../destinations';
-import { buildCandidateSet } from '../travel-intelligence/candidate-set';
+import { buildCandidateSet, type Candidate } from '../travel-intelligence/candidate-set';
+import { mergeMustVisitCandidates, findMissingMustVisitPlaces } from '../travel-intelligence/must-visit';
 import { AiOrchestrationService } from '../ai/ai-orchestration-service';
 import type { LlmProvider } from '../ai/llm-provider';
 import type { GeneratedItineraryItem } from '../ai/itinerary-plan';
@@ -13,6 +14,16 @@ export interface GenerateItineraryInput {
   interests: string[];
   startDate: string;
   endDate: string;
+  /**
+   * Already-resolved must-visit candidates (Phase 3) - resolution
+   * itself (free-text name -> real place, rejecting unresolved/ambiguous
+   * references) happens upstream in the Planning Agent, never here. This
+   * module's only responsibility for them is (a) guaranteeing they're
+   * offered to the LLM regardless of the candidate-set proximity cap,
+   * and (b) failing loudly if the generated result omits one - it never
+   * silently drops a must-visit place.
+   */
+  mustVisitCandidates?: Candidate[];
 }
 
 export interface GenerateItineraryResult {
@@ -61,13 +72,25 @@ export async function runItineraryJob(
   try {
     await markJobProcessing(pool, jobId);
 
-    const candidateSet = await buildCandidateSet(pool, destination.slug, destination.center);
+    const baseCandidateSet = await buildCandidateSet(pool, destination.slug, destination.center);
+    const mustVisit = input.mustVisitCandidates ?? [];
+    const candidateSet = mustVisit.length > 0 ? mergeMustVisitCandidates(baseCandidateSet, mustVisit) : baseCandidateSet;
+
     const aiService = new AiOrchestrationService(llmProvider);
     const itineraryResult = await aiService.generateItinerary(candidateSet, {
       destination: destination.slug,
       interests: input.interests,
       numberOfDays,
     });
+
+    if (mustVisit.length > 0) {
+      const missing = findMissingMustVisitPlaces(itineraryResult.itinerary, mustVisit);
+      if (missing.length > 0) {
+        throw new Error(
+          `The generated itinerary did not include required must-visit place(s): ${missing.map((c) => c.name).join(', ')}`,
+        );
+      }
+    }
 
     const itineraryId = await persistItinerary(
       pool,

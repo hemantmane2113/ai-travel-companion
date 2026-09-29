@@ -10,11 +10,11 @@ export class CompanionMessageDto {
   @IsUUID()
   conversationId?: string;
 
-  // Structured trip-planning fields, all-or-nothing: the Phase 2
-  // Supervisor does no natural-language date/destination extraction, so
-  // a full-trip request is only recognized when a client supplies these
-  // explicitly (e.g. from a destination picker + date range UI)
-  // alongside the free-text message - see src/companion/supervisor.ts.
+  // Structured trip-planning fields, all-or-nothing: the Supervisor Agent
+  // does no natural-language date/destination extraction, so a full-trip
+  // request is only recognized when a client supplies these explicitly
+  // (e.g. from a destination picker + date range UI) alongside the
+  // free-text message - see src/agents/supervisor-agent.ts.
   @IsOptional()
   @IsString()
   @MaxLength(100)
@@ -33,4 +33,16 @@ export class CompanionMessageDto {
   @IsOptional()
   @IsDateString()
   endDate?: string;
+
+  // Free-text place names the traveler explicitly wants included
+  // (Phase 3). Extraction from prose into this array is NOT done by
+  // this system yet - a client (or a future NLP layer) supplies it
+  // directly; the Planning Agent then resolves each name deterministically
+  // against known places (src/travel-intelligence/must-visit.ts). Only
+  // meaningful alongside destinationSlug/startDate/endDate.
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  @ArrayMaxSize(10)
+  mustVisit?: string[];
 }

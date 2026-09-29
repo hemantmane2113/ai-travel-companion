@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import { Pool } from 'pg';
-import { routeMessage } from '../src/companion/supervisor';
+import { routeMessage } from '../src/agents/supervisor-agent';
 import { listMessages } from '../src/companion/conversations';
 import { ingestPlaces } from '../src/ingestion/ingest-places';
 import { getJob } from '../src/itinerary/jobs';
@@ -23,7 +23,7 @@ class FixturePlacesProvider implements PlacesProvider {
   }
 }
 
-const TEST_PREFIX = 'test:supervisor';
+const TEST_PREFIX = 'test:supervisor-agent';
 const { bbox, center } = DESTINATIONS.delhi;
 const START_DATE = '2026-10-01';
 const END_DATE = '2026-10-01';
@@ -45,8 +45,8 @@ function noopLlm(): FakeLlmProvider {
   return new FakeLlmProvider('THIS SHOULD NEVER BE CALLED FOR A Q&A REQUEST');
 }
 
-describe('routeMessage (Phase 2 Supervisor)', () => {
-  it('routes a full-trip request (destinationSlug + dates supplied) into the EXISTING itinerary pipeline unchanged', async () => {
+describe('routeMessage (Supervisor Agent)', () => {
+  it('routes a full-trip request (destinationSlug + dates supplied) to the Planning Agent, which reaches the existing itinerary pipeline unchanged', async () => {
     const provider = new FixturePlacesProvider([RED_FORT]);
     await ingestPlaces(pool, provider, 'delhi', bbox);
 

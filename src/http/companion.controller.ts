@@ -4,7 +4,7 @@ import type { LlmProvider } from '../ai/llm-provider';
 import { LLM_PROVIDER, POOL } from './tokens';
 import { CompanionMessageDto } from './dto/companion-message.dto';
 import { validateDto } from './validate-dto';
-import { routeMessage, type CompanionResult } from '../companion/supervisor';
+import { routeMessage, type CompanionResult } from '../agents/supervisor-agent';
 
 /**
  * The Phase 2 companion entry point (docs/architecture-v2-agent-companion.md
