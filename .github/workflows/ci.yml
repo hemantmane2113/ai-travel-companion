@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: travel
+          POSTGRES_PASSWORD: travel
+          POSTGRES_DB: travel_companion
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U travel -d travel_companion"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      # Phase 5 introduced Redis-backed provider rate limiting
+      # (src/rate-limit/) with tests that connect to a real Redis
+      # instance - this service container was missing, which is why
+      # those tests hung until ioredis's connection retries/test
+      # timeouts were exhausted in CI.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://travel:travel@localhost:5432/travel_companion
+      REDIS_URL: redis://localhost:6379
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - run: npm run typecheck
+
+      - run: npm run migrate
+
+      - run: npm test
