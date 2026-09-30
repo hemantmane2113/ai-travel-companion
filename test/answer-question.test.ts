@@ -3,15 +3,25 @@ import { Pool } from 'pg';
 import { answerQuestion } from '../src/companion/answer-question';
 import { ingestPlaces } from '../src/ingestion/ingest-places';
 import { seedWarnings } from '../src/advisory/seed-warnings';
+import { FakeLlmProvider } from '../src/ai/fake-llm-provider';
+import { insertKnowledgeDocument } from '../src/knowledge/knowledge-documents';
 import { DESTINATIONS } from '../src/destinations';
 import type { BoundingBox, NormalizedPlace, PlacesProvider } from '../src/providers/places-provider';
-import { deleteDestination, deletePlacesByExternalRef } from './helpers/db-cleanup';
+import { deleteDestination, deleteKnowledgeDocumentsByIds, deletePlacesByExternalRef } from './helpers/db-cleanup';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
 afterAll(async () => {
   await pool.end();
 });
+
+// None of these existing (pre-Phase-6) question shapes are
+// knowledge-oriented, so the LLM must never be invoked for any of them -
+// this stand-in exists only to satisfy the signature, and its response
+// would fail every assertion below if it were ever actually called.
+function noopLlm(): FakeLlmProvider {
+  return new FakeLlmProvider('THIS SHOULD NEVER BE CALLED');
+}
 
 class FixturePlacesProvider implements PlacesProvider {
   readonly sourceName = 'Fixture';
@@ -56,6 +66,7 @@ describe('answerQuestion (Phase 2 Q&A capability)', () => {
       try {
         const result = await answerQuestion(
           pool,
+          noopLlm(),
           'How far is Distance Test Fort from Distance Test Gate?',
         );
 
@@ -69,6 +80,7 @@ describe('answerQuestion (Phase 2 Q&A capability)', () => {
     it('gives an honest answer instead of a fabricated distance when a place is unknown', async () => {
       const result = await answerQuestion(
         pool,
+        noopLlm(),
         'How far is Totally Unknown Place One from Totally Unknown Place Two?',
       );
 
@@ -96,7 +108,7 @@ describe('answerQuestion (Phase 2 Q&A capability)', () => {
       await ingestPlaces(pool, provider, 'delhi', bbox);
 
       try {
-        const result = await answerQuestion(pool, 'What should I eat in Delhi?');
+        const result = await answerQuestion(pool, noopLlm(), 'What should I eat in Delhi?');
 
         expect(result.matchedDestinationSlug).toBe('delhi');
         expect(result.text).toContain("Karim's");
@@ -111,7 +123,7 @@ describe('answerQuestion (Phase 2 Q&A capability)', () => {
       await seedWarnings(pool, 'delhi');
 
       try {
-        const result = await answerQuestion(pool, 'Tell me about Delhi.');
+        const result = await answerQuestion(pool, noopLlm(), 'Tell me about Delhi.');
 
         expect(result.matchedDestinationSlug).toBe('delhi');
         expect(result.text).toMatch(/Delhi has \d+ attraction\(s\), \d+ restaurant\(s\) and \d+ shop\(s\) on file/);
@@ -124,9 +136,48 @@ describe('answerQuestion (Phase 2 Q&A capability)', () => {
   });
 
   it('gives an honest "no information" answer for a destination this system has no data for, rather than inventing recommendations', async () => {
-    const result = await answerQuestion(pool, 'What should I eat at Indore Khau Galli?');
+    const result = await answerQuestion(pool, noopLlm(), 'What should I eat at Indore Khau Galli?');
 
     expect(result.matchedDestinationSlug).toBeNull();
     expect(result.text).toMatch(/don't have information about that destination/);
+  });
+
+  describe('knowledge questions (Phase 6 RAG)', () => {
+    it('uses knowledge retrieval and grounded narration for a visa/advisory question', async () => {
+      const doc = await insertKnowledgeDocument(pool, {
+        category: 'visa',
+        destinationSlug: 'delhi',
+        title: 'Test-inserted visa requirement for Delhi',
+        content: 'A test-inserted e-Visa is required before arrival in Delhi.',
+        sourceName: 'Test Q&A Source',
+      });
+
+      try {
+        const llm = new FakeLlmProvider(
+          JSON.stringify({
+            answer: 'You need an e-Visa before arriving.',
+            citations: [{ documentId: doc.id, note: 'Visa requirement.' }],
+          }),
+        );
+
+        const result = await answerQuestion(pool, llm, 'What are the visa requirements for Delhi?');
+
+        expect(result.matchedDestinationSlug).toBe('delhi');
+        expect(result.text).toBe('You need an e-Visa before arriving.');
+      } finally {
+        await deleteKnowledgeDocumentsByIds(pool, [doc.id]);
+      }
+    });
+
+    it('honestly reports no information when a knowledge question matches no retrieved document, never fabricating an answer', async () => {
+      const result = await answerQuestion(
+        pool,
+        noopLlm(),
+        'What is the xyzzyqux123nonexistent visa requirement for Delhi?',
+      );
+
+      expect(result.matchedDestinationSlug).toBe('delhi');
+      expect(result.text).toMatch(/don't have any information on file/);
+    });
   });
 });

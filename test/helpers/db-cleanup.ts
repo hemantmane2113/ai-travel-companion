@@ -78,3 +78,16 @@ export async function deleteDestination(pool: Pool, slug: string): Promise<void>
   ]);
   await pool.query('delete from destinations where id = $1', [destinationId]);
 }
+
+/**
+ * Test-only helper: removes knowledge_documents rows by exact id.
+ * Nothing else has an FK dependency on this table, so a plain delete is
+ * safe with no ordering concerns - but callers should still capture and
+ * pass exact ids (never a broad category/destination_slug query) so
+ * repeated test runs never accumulate rows that could shift full-text
+ * search ranking/ordering assertions in later runs.
+ */
+export async function deleteKnowledgeDocumentsByIds(pool: Pool, ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  await pool.query('delete from knowledge_documents where id = any($1::uuid[])', [ids]);
+}

@@ -94,4 +94,20 @@ export class CompanionMessageDto {
   @IsString()
   @MaxLength(200)
   cancellationPolicyOfferId?: string;
+
+  // Structured booking-intent trigger (Phase 6) - the offerId to
+  // prepare a booking intent for (src/booking/booking-intent.ts). Never
+  // inferred from free text like "book this".
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  bookingOfferId?: string;
+
+  // Structured booking-confirmation trigger (Phase 6) - the EXACT
+  // taskId a prior booking-intent response returned. This is the
+  // explicit confirmation mechanism itself (plan §I) - a UUID, not a
+  // free-text "yes".
+  @IsOptional()
+  @IsUUID()
+  confirmBookingTaskId?: string;
 }

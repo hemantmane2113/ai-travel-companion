@@ -9,6 +9,7 @@ import { answerQuestion } from '../companion/answer-question';
 import { appendMessage, createConversation, requireConversation } from '../companion/conversations';
 import { getLatestTaskForConversation } from '../tasks/tasks';
 import { getCancellationPolicy, type CancellationPolicyResult } from '../tasks/get-cancellation-policy';
+import { createBookingIntent, confirmBookingIntent, type BookingIntentResult } from '../booking/booking-intent';
 
 export interface CompanionInput {
   message: string;
@@ -35,6 +36,10 @@ export interface CompanionInput {
   comparisonDomains?: Domain[];
   /** Structured cancellation-policy lookup trigger (Phase 5) - the offerId to look up within the conversation's latest completed comparison task. */
   cancellationPolicyOfferId?: string;
+  /** Structured booking-intent trigger (Phase 6) - the offerId (from the conversation's latest completed comparison task) to prepare a booking intent for. Never inferred from free text like "book this". */
+  bookingOfferId?: string;
+  /** Structured booking-confirmation trigger (Phase 6) - the EXACT taskId a prior booking-intent response returned. This exact-id requirement IS the explicit confirmation mechanism (plan §I) - never inferred from sentiment, and never satisfied by anything else. */
+  confirmBookingTaskId?: string;
 }
 
 export type CompanionResult =
@@ -42,6 +47,8 @@ export type CompanionResult =
   | { route: 'qa'; conversationId: string; answer: string }
   | { route: 'comparison'; conversationId: string; taskId: string; result: ComparisonTaskResult }
   | { route: 'cancellation_policy'; conversationId: string; result: CancellationPolicyResult }
+  | { route: 'booking_intent'; conversationId: string; result: BookingIntentResult }
+  | { route: 'booking_confirmed'; conversationId: string; result: BookingIntentResult }
   | {
       route: 'ordinal_selection';
       conversationId: string;
@@ -98,22 +105,27 @@ async function resolveOrdinalSelection(
 /**
  * The Supervisor Agent (docs/architecture-v2-agent-companion.md §C):
  * a deterministic-first router. Routing is decided purely by structured
- * signals - field presence for full-trip/comparison/cancellation-policy,
- * an exact ordinal pattern for a follow-up selection - never fuzzy
- * keyword or LLM classification of the message text (still out of
+ * signals - field presence for full-trip/comparison/cancellation-policy/
+ * booking, an exact ordinal pattern for a follow-up selection - never
+ * fuzzy keyword or LLM classification of the message text (still out of
  * scope, per plan §G's hybrid router: deterministic first, LLM fallback
  * only for genuine ambiguity, not yet needed while every route has an
  * unambiguous structured signal).
  *
- * This module intentionally does no travel/comparison reasoning of its
- * own, contains no domain-specific (hotel/flight/train/bus) logic, and
- * never calls a provider directly - it selects a capability (Planning
- * Agent, Comparison Agent, cancellation-policy tool, ordinal resolution,
- * or the Q&A tool) and dispatches to it, nothing more.
+ * This module intentionally does no travel/comparison/booking reasoning
+ * of its own, contains no domain-specific (hotel/flight/train/bus)
+ * logic, and never calls a provider directly - it selects a capability
+ * (Planning Agent, Comparison Agent, cancellation-policy tool, booking
+ * intent/confirmation, ordinal resolution, or the Q&A tool) and
+ * dispatches to it, nothing more. Booking CONFIRMATION (Phase 6) is
+ * deliberately the only route requiring an exact, previously-issued
+ * identifier (`confirmBookingTaskId`) rather than any free-text signal -
+ * this is the explicit confirmation boundary itself, not a convenience.
  *
- * Route priority: full trip > comparison > cancellation policy > ordinal
- * follow-up > Q&A. All but Q&A are structured/pattern signals checked in
- * that fixed order; Q&A is the default when none matches.
+ * Route priority: full trip > comparison > cancellation policy > confirm
+ * booking > create booking intent > ordinal follow-up > Q&A. All but Q&A
+ * are structured/pattern signals checked in that fixed order; Q&A is the
+ * default when none matches.
  */
 export async function routeMessage(
   pool: Pool,
@@ -193,6 +205,27 @@ export async function routeMessage(
     return { route: 'cancellation_policy', conversationId, result };
   }
 
+  if (input.confirmBookingTaskId) {
+    const result = await confirmBookingIntent(pool, conversationId, input.confirmBookingTaskId);
+    await appendMessage(pool, conversationId, 'assistant', `Confirmed - booking ${result.taskId} for ${result.selectedOffer.provider}.`, {
+      route: 'booking_confirmed',
+      taskId: result.taskId,
+    });
+    return { route: 'booking_confirmed', conversationId, result };
+  }
+
+  if (input.bookingOfferId) {
+    const result = await createBookingIntent(pool, conversationId, input.bookingOfferId);
+    await appendMessage(
+      pool,
+      conversationId,
+      'assistant',
+      `I've prepared this booking (${result.selectedOffer.provider}, ${result.selectedOffer.price} ${result.selectedOffer.currency}) - reply with confirmBookingTaskId "${result.taskId}" to confirm.`,
+      { route: 'booking_intent', taskId: result.taskId },
+    );
+    return { route: 'booking_intent', conversationId, result };
+  }
+
   const ordinalParse = parseOrdinal(input.message);
 
   if (ordinalParse.kind === 'ambiguous') {
@@ -211,7 +244,7 @@ export async function routeMessage(
     return selection;
   }
 
-  const { text, matchedDestinationSlug } = await answerQuestion(pool, input.message);
+  const { text, matchedDestinationSlug } = await answerQuestion(pool, llmProvider, input.message);
   await appendMessage(pool, conversationId, 'assistant', text, { route: 'qa', matchedDestinationSlug });
 
   return { route: 'qa', conversationId, answer: text };

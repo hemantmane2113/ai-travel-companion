@@ -3,6 +3,9 @@ import { DESTINATIONS, type Destination } from '../destinations';
 import { buildCandidateSet } from '../travel-intelligence/candidate-set';
 import { recommendFood } from '../food/recommend-food';
 import { haversineDistanceKm } from '../geo';
+import { retrieveKnowledge } from '../knowledge/retrieve-knowledge';
+import { narrateKnowledge } from '../ai/knowledge-narration';
+import type { LlmProvider } from '../ai/llm-provider';
 
 export interface QuestionAnswer {
   text: string;
@@ -60,15 +63,19 @@ async function answerDistanceQuestion(pool: Pool, nameA: string, nameB: string):
   };
 }
 
+const KNOWLEDGE_QUESTION = /\b(visa|advisory|advisories|safety|requirement|entry requirement)\b/i;
+
 /**
  * The Phase 2 Q&A capability (plan §N Phase 2 / CLAUDE.md §5.3): answers
  * a small question using only existing deterministic Travel Intelligence
- * reads - no LLM call, and therefore no fabrication risk at all for any
- * of these answer shapes. Never creates an itinerary or a task. When the
- * question is about a destination/place this system has no data for, it
- * says so honestly instead of guessing (plan §16 trust boundary).
+ * reads, or (Phase 6) deterministic knowledge retrieval - grounded
+ * synthesis is the only path here that ever calls an LLM, and even then
+ * only when relevant documents were actually retrieved. Never creates an
+ * itinerary or a task. When the question is about a destination/place
+ * this system has no data for, it says so honestly instead of guessing
+ * (plan §16 trust boundary).
  */
-export async function answerQuestion(pool: Pool, message: string): Promise<QuestionAnswer> {
+export async function answerQuestion(pool: Pool, llmProvider: LlmProvider, message: string): Promise<QuestionAnswer> {
   const distanceMatch = message.match(DISTANCE_QUESTION);
   if (distanceMatch) {
     return answerDistanceQuestion(pool, distanceMatch[1].trim(), distanceMatch[2].trim());
@@ -84,6 +91,23 @@ export async function answerQuestion(pool: Pool, message: string): Promise<Quest
   }
 
   const lower = message.toLowerCase();
+
+  // RAG path (V2 architecture Phase 6 §3/§G): deterministic keyword
+  // dispatch, same tier as the existing "eat/food/restaurant" check
+  // below - no LLM intent classification, and the LLM is only ever
+  // invoked over documents already retrieved deterministically.
+  if (KNOWLEDGE_QUESTION.test(message)) {
+    const documents = await retrieveKnowledge(pool, message, { destinationSlug: destination.slug });
+    if (documents.length === 0) {
+      return {
+        text: `I don't have any information on file about that for ${destination.name}.`,
+        matchedDestinationSlug: destination.slug,
+      };
+    }
+    const { answer } = await narrateKnowledge(llmProvider, documents, message);
+    return { text: answer, matchedDestinationSlug: destination.slug };
+  }
+
   if (lower.includes('eat') || lower.includes('food') || lower.includes('restaurant')) {
     const recommendations = await recommendFood(pool, destination.slug, destination.center);
     if (recommendations.length === 0) {

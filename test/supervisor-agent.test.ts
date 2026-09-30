@@ -332,4 +332,96 @@ describe('routeMessage (Supervisor Agent)', () => {
     if (result.route !== 'comparison') throw new Error('unreachable');
     expect(result.result.domains).toEqual(['hotel']);
   });
+
+  it('a bookingOfferId request routes to booking-intent creation, awaiting confirmation', async () => {
+    const comparison = await routeMessage(pool, noopLlm(), {
+      message: 'Compare hotels near Karol Bagh',
+      hotelSearchLocation: 'Karol Bagh',
+    });
+    if (comparison.route !== 'comparison') throw new Error('unreachable');
+    const offerId = comparison.result.offers[0].offerId;
+
+    const result = await routeMessage(pool, noopLlm(), {
+      message: 'I want to book this.',
+      conversationId: comparison.conversationId,
+      bookingOfferId: offerId,
+    });
+
+    expect(result.route).toBe('booking_intent');
+    if (result.route !== 'booking_intent') throw new Error('unreachable');
+    expect(result.result.bookingStatus).toBe('awaiting_confirmation');
+    expect(result.result.selectedOffer.offerId).toBe(offerId);
+  });
+
+  it('saying "book this" WITHOUT the explicit confirmBookingTaskId never confirms anything - confirmation is never inferred from sentiment', async () => {
+    const comparison = await routeMessage(pool, noopLlm(), {
+      message: 'Compare hotels near Karol Bagh',
+      hotelSearchLocation: 'Karol Bagh',
+    });
+    if (comparison.route !== 'comparison') throw new Error('unreachable');
+    const offerId = comparison.result.offers[0].offerId;
+
+    const intentResult = await routeMessage(pool, noopLlm(), {
+      message: 'Book this hotel please, yes confirm it, go ahead.',
+      conversationId: comparison.conversationId,
+      bookingOfferId: offerId,
+    });
+    if (intentResult.route !== 'booking_intent') throw new Error('unreachable');
+    // Enthusiastic free text alone never advances bookingStatus - only
+    // an explicit confirmBookingTaskId on a later request can.
+    expect(intentResult.result.bookingStatus).toBe('awaiting_confirmation');
+  });
+
+  it('a confirmBookingTaskId request routes to booking confirmation and transitions the exact pending intent', async () => {
+    const comparison = await routeMessage(pool, noopLlm(), {
+      message: 'Compare hotels near Karol Bagh',
+      hotelSearchLocation: 'Karol Bagh',
+    });
+    if (comparison.route !== 'comparison') throw new Error('unreachable');
+    const offerId = comparison.result.offers[0].offerId;
+
+    const intent = await routeMessage(pool, noopLlm(), {
+      message: 'Book this.',
+      conversationId: comparison.conversationId,
+      bookingOfferId: offerId,
+    });
+    if (intent.route !== 'booking_intent') throw new Error('unreachable');
+
+    const confirmed = await routeMessage(pool, noopLlm(), {
+      message: 'Yes, confirmed.',
+      conversationId: comparison.conversationId,
+      confirmBookingTaskId: intent.result.taskId,
+    });
+
+    expect(confirmed.route).toBe('booking_confirmed');
+    if (confirmed.route !== 'booking_confirmed') throw new Error('unreachable');
+    expect(confirmed.result.bookingStatus).toBe('confirmed');
+    expect(confirmed.result.executionState).toBe('not_executed');
+  });
+
+  it('confirming an unknown booking taskId is rejected, never guessed at', async () => {
+    await expect(
+      routeMessage(pool, noopLlm(), {
+        message: 'Yes, confirmed.',
+        confirmBookingTaskId: '00000000-0000-0000-0000-000000000000',
+      }),
+    ).rejects.toThrow(/Unknown booking to confirm/);
+  });
+
+  it('a knowledge-oriented question ("visa requirements") reaches Q&A, not comparison/booking, and is answered honestly when nothing matches', async () => {
+    // A nonsense term guarantees this AND-query can never accidentally
+    // match another concurrently-running test file's own temporary
+    // knowledge-document fixture (Vitest runs files in parallel) -
+    // exact same isolation principle as the "unknown knowledge" test in
+    // answer-question.test.ts.
+    const result = await routeMessage(pool, noopLlm(), {
+      message: 'What is the xyzzyqux789nonexistent visa requirement for Delhi?',
+    });
+    expect(result.route).toBe('qa');
+    if (result.route !== 'qa') throw new Error('unreachable');
+    // noopLlm() would throw/return garbage if actually invoked - since
+    // retrieval finds nothing, the LLM is correctly never called at
+    // all, proving "no LLM unless useful" for this path too.
+    expect(result.answer).toMatch(/don't have any information on file/);
+  });
 });
