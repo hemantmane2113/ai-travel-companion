@@ -1,12 +1,14 @@
 import type { Pool } from 'pg';
 import type { LlmProvider } from '../ai/llm-provider';
-import type { HotelProvider } from '../providers/hotel-provider';
+import type { Domain } from '../providers/hotel-provider';
+import type { ProviderRateLimiter } from '../rate-limit/provider-rate-limiter';
 import { planTrip } from './planning-agent';
-import { runComparison, type ComparisonTaskResult, type Domain } from './comparison-agent';
+import { runComparison, type ComparisonProviders, type ComparisonTaskResult } from './comparison-agent';
 import { parseOrdinal } from './ordinal-resolution';
 import { answerQuestion } from '../companion/answer-question';
 import { appendMessage, createConversation, requireConversation } from '../companion/conversations';
 import { getLatestTaskForConversation } from '../tasks/tasks';
+import { getCancellationPolicy, type CancellationPolicyResult } from '../tasks/get-cancellation-policy';
 
 export interface CompanionInput {
   message: string;
@@ -17,14 +19,29 @@ export interface CompanionInput {
   endDate?: string;
   /** Free-text must-visit place names (Phase 3) - resolved deterministically by the Planning Agent, never guessed here. */
   mustVisit?: string[];
-  /** Structured hotel-comparison trigger (Phase 4) - presence alone routes to the Comparison Agent; no NLP extraction of the location from `message`. */
+  /** Structured hotel-comparison criteria (Phase 4). Presence alone routes to the Comparison Agent when `comparisonDomains` is not supplied - implies domains=['hotel'], preserving Phase 4's exact behavior. */
   hotelSearchLocation?: string;
+  /** Structured transport-comparison criteria (Phase 5) - required together when any transport domain is requested. */
+  transportOrigin?: string;
+  transportDestination?: string;
+  /**
+   * Explicit domain set for a comparison request (Phase 5) - the ONLY
+   * way to request more than 'hotel', or a combination of domains, in
+   * one comparison. No NLP inference of "which domains were meant" -
+   * the client states them directly, mirroring how `mustVisit` is
+   * client-supplied rather than extracted from prose. When omitted,
+   * falls back to `hotelSearchLocation` alone implying ['hotel'].
+   */
+  comparisonDomains?: Domain[];
+  /** Structured cancellation-policy lookup trigger (Phase 5) - the offerId to look up within the conversation's latest completed comparison task. */
+  cancellationPolicyOfferId?: string;
 }
 
 export type CompanionResult =
   | { route: 'full_trip'; conversationId: string; jobId: string }
   | { route: 'qa'; conversationId: string; answer: string }
   | { route: 'comparison'; conversationId: string; taskId: string; result: ComparisonTaskResult }
+  | { route: 'cancellation_policy'; conversationId: string; result: CancellationPolicyResult }
   | {
       route: 'ordinal_selection';
       conversationId: string;
@@ -38,7 +55,12 @@ export type CompanionResult =
  * conversation's most recent COMPLETE comparison task - never a fresh
  * provider search, never LLM memory. Intentionally the smallest
  * possible mechanism: exact ordinal parse (src/agents/ordinal-resolution.ts)
- * -> exact array-index lookup into the persisted `tasks.result.offers`.
+ * -> exact array-index lookup into the persisted `tasks.result.offers`,
+ * which (Phase 5) may now be a domain-mixed list - the offer's own
+ * `domain` field (present on every persisted offer regardless of
+ * domain) is what lets a caller distinguish "hotel offer #1" from
+ * "flight offer #2" purely from the returned identity, unchanged from
+ * how this function already worked in Phase 4.
  * Ambiguity, an out-of-range ordinal, or no open comparison task all
  * throw a plain Error rather than guessing - same clarify-don't-guess
  * posture Phase 3's must-visit resolution already established, and the
@@ -52,7 +74,7 @@ async function resolveOrdinalSelection(
   const task = await getLatestTaskForConversation(pool, conversationId, 'comparison');
   if (!task || task.status !== 'complete' || !task.result) {
     throw new Error(
-      "I don't have a completed hotel comparison in this conversation to select from - try comparing hotels first.",
+      "I don't have a completed comparison in this conversation to select from - try comparing hotels or transport first.",
     );
   }
 
@@ -76,28 +98,31 @@ async function resolveOrdinalSelection(
 /**
  * The Supervisor Agent (docs/architecture-v2-agent-companion.md §C):
  * a deterministic-first router. Routing is decided purely by structured
- * signals - field presence for full-trip/comparison, an exact ordinal
- * pattern for a follow-up selection - never fuzzy keyword or LLM
- * classification of the message text (still out of scope, per plan §G's
- * hybrid router: deterministic first, LLM fallback only for genuine
- * ambiguity, not yet needed while every route has an unambiguous
- * structured signal).
+ * signals - field presence for full-trip/comparison/cancellation-policy,
+ * an exact ordinal pattern for a follow-up selection - never fuzzy
+ * keyword or LLM classification of the message text (still out of
+ * scope, per plan §G's hybrid router: deterministic first, LLM fallback
+ * only for genuine ambiguity, not yet needed while every route has an
+ * unambiguous structured signal).
  *
  * This module intentionally does no travel/comparison reasoning of its
- * own and never calls a provider directly - it selects a capability
- * (Planning Agent, Comparison Agent, ordinal resolution, or the Q&A
- * tool) and dispatches to it, nothing more.
+ * own, contains no domain-specific (hotel/flight/train/bus) logic, and
+ * never calls a provider directly - it selects a capability (Planning
+ * Agent, Comparison Agent, cancellation-policy tool, ordinal resolution,
+ * or the Q&A tool) and dispatches to it, nothing more.
  *
- * Route priority: full trip > hotel comparison > ordinal follow-up > Q&A.
- * The first three are structured/pattern signals checked in that fixed
- * order; Q&A is the default when none matches.
+ * Route priority: full trip > comparison > cancellation policy > ordinal
+ * follow-up > Q&A. All but Q&A are structured/pattern signals checked in
+ * that fixed order; Q&A is the default when none matches.
  */
 export async function routeMessage(
   pool: Pool,
   llmProvider: LlmProvider,
   input: CompanionInput,
-  /** Injectable for testability - see comparison-agent.ts's RunComparisonInput.providers. Omit to use the Comparison Agent's own default (the mock provider). */
-  hotelProviders?: HotelProvider[],
+  /** Injectable for testability - see comparison-agent.ts's RunComparisonInput.providers. Omit to use each domain's own default (mocked) provider. */
+  comparisonProviders?: ComparisonProviders,
+  /** Injectable - omit to skip rate limiting entirely. */
+  rateLimiter?: ProviderRateLimiter,
 ): Promise<CompanionResult> {
   const conversationId = input.conversationId
     ? await requireConversation(pool, input.conversationId)
@@ -127,19 +152,45 @@ export async function routeMessage(
     return { route: 'full_trip', conversationId, jobId };
   }
 
-  const isComparisonRequest = Boolean(input.hotelSearchLocation);
+  // The explicit domain set (when supplied) is authoritative; omitting
+  // it while supplying hotelSearchLocation preserves Phase 4's exact
+  // behavior (domains=['hotel']) unchanged.
+  const requestedDomains: Domain[] =
+    input.comparisonDomains && input.comparisonDomains.length > 0
+      ? input.comparisonDomains
+      : input.hotelSearchLocation
+        ? ['hotel']
+        : [];
 
-  if (isComparisonRequest) {
+  if (requestedDomains.length > 0) {
     const { taskId, result } = await runComparison(pool, llmProvider, {
-      domains: ['hotel'],
-      location: input.hotelSearchLocation!,
+      domains: requestedDomains,
       conversationId,
-      providers: hotelProviders,
+      location: input.hotelSearchLocation,
+      origin: input.transportOrigin,
+      destination: input.transportDestination,
+      providers: comparisonProviders,
+      rateLimiter,
     });
 
     await appendMessage(pool, conversationId, 'assistant', result.narrative, { route: 'comparison', taskId });
 
     return { route: 'comparison', conversationId, taskId, result };
+  }
+
+  if (input.cancellationPolicyOfferId) {
+    const result = await getCancellationPolicy(pool, conversationId, input.cancellationPolicyOfferId);
+    const text =
+      result.status === 'known'
+        ? `Cancellation policy (via ${result.provider}): ${result.policy}`
+        : "I don't have a cancellation policy on file for that offer.";
+
+    await appendMessage(pool, conversationId, 'assistant', text, {
+      route: 'cancellation_policy',
+      status: result.status,
+    });
+
+    return { route: 'cancellation_policy', conversationId, result };
   }
 
   const ordinalParse = parseOrdinal(input.message);

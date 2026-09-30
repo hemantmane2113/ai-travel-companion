@@ -1,17 +1,34 @@
 import { Global, Module } from '@nestjs/common';
 import { Pool } from 'pg';
+import { Redis } from 'ioredis';
 import { OpenAiCompatibleAdapter } from '../ai/openai-compatible-adapter';
 import { loadLlmConfigFromEnv } from '../ai/config';
 import type { LlmProvider } from '../ai/llm-provider';
 import type { HotelProvider } from '../providers/hotel-provider';
 import { MockHotelProvider } from '../providers/mock-hotel-provider';
-import { HOTEL_PROVIDERS, LLM_PROVIDER, POOL } from './tokens';
+import type { FlightProvider, TrainProvider, BusProvider } from '../providers/transport-provider';
+import { MockFlightProvider } from '../providers/mock-flight-provider';
+import { MockTrainProvider } from '../providers/mock-train-provider';
+import { MockBusProvider } from '../providers/mock-bus-provider';
+import { RedisRateLimiterStore } from '../rate-limit/redis-rate-limiter-store';
+import { ProviderRateLimiter } from '../rate-limit/provider-rate-limiter';
+import { loadRateLimiterConfigFromEnv } from '../rate-limit/config';
+import {
+  BUS_PROVIDERS,
+  FLIGHT_PROVIDERS,
+  HOTEL_PROVIDERS,
+  LLM_PROVIDER,
+  POOL,
+  PROVIDER_RATE_LIMITER,
+  TRAIN_PROVIDERS,
+} from './tokens';
 
 /**
  * Wires the plain, framework-free modules (Pool, AI Orchestration's
- * provider-neutral adapter) into Nest's DI container. This is the only
- * file that decides which concrete LlmProvider implementation is
- * active - swapping it is a config change (plan §6), not a controller
+ * provider-neutral adapter, the Comparison Agent's provider
+ * registrations and rate limiter) into Nest's DI container. This is the
+ * only file that decides which concrete implementation is active -
+ * swapping any of them is a config change (plan §6), not a controller
  * change.
  */
 @Global()
@@ -33,7 +50,42 @@ import { HOTEL_PROVIDERS, LLM_PROVIDER, POOL } from './tokens';
       provide: HOTEL_PROVIDERS,
       useFactory: (): HotelProvider[] => [new MockHotelProvider()],
     },
+    {
+      // Phase 5: same posture - mocked, not a real/sandbox integration.
+      provide: FLIGHT_PROVIDERS,
+      useFactory: (): FlightProvider[] => [new MockFlightProvider()],
+    },
+    {
+      provide: TRAIN_PROVIDERS,
+      useFactory: (): TrainProvider[] => [new MockTrainProvider()],
+    },
+    {
+      provide: BUS_PROVIDERS,
+      useFactory: (): BusProvider[] => [new MockBusProvider()],
+    },
+    {
+      // Phase 5: the one Redis client abstraction this codebase
+      // introduces - Redis was provisioned since Phase 1 (docker-compose.yml)
+      // but deliberately left unused until a phase actually needed it
+      // (docs/architecture-v2-agent-companion.md §L/§N). `lazyConnect`
+      // avoids a hard startup dependency on Redis being reachable before
+      // the app can even boot - the rate limiter itself fails OPEN if a
+      // call errors (see ProviderRateLimiter's documented decision), so
+      // a slow/late Redis connection degrades to "not rate limited yet",
+      // never to a boot failure.
+      provide: PROVIDER_RATE_LIMITER,
+      useFactory: (): ProviderRateLimiter => {
+        const config = loadRateLimiterConfigFromEnv();
+        const redis = new Redis(config.redisUrl, { lazyConnect: true, maxRetriesPerRequest: 1 });
+        redis.connect().catch(() => {});
+        const store = new RedisRateLimiterStore(redis);
+        return new ProviderRateLimiter(store, {
+          maxCallsPerWindow: config.maxCallsPerWindow,
+          windowSeconds: config.windowSeconds,
+        });
+      },
+    },
   ],
-  exports: [POOL, LLM_PROVIDER, HOTEL_PROVIDERS],
+  exports: [POOL, LLM_PROVIDER, HOTEL_PROVIDERS, FLIGHT_PROVIDERS, TRAIN_PROVIDERS, BUS_PROVIDERS, PROVIDER_RATE_LIMITER],
 })
 export class CoreModule {}

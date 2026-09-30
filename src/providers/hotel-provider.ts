@@ -1,4 +1,11 @@
-export type Domain = 'hotel';
+/**
+ * V2 architecture Phase 5: widened from 'hotel'-only to every domain the
+ * Comparison Agent's contract (`domains: Domain[]`) was always designed
+ * to support (§C/§12) - no interface change was needed anywhere that
+ * already depended on `Domain[]`, only here and in SUPPORTED_DOMAINS
+ * (src/agents/comparison-agent.ts).
+ */
+export type Domain = 'hotel' | 'flight' | 'train' | 'bus';
 
 export interface HotelSearchCriteria {
   location: string;
@@ -19,7 +26,7 @@ export interface HotelLocation {
  */
 export interface NormalizedHotelOffer {
   provider: string;
-  domain: Domain;
+  domain: 'hotel';
   /** Stable within this provider - the identity later reference resolution and booking key off. */
   offerId: string;
   name: string;

@@ -4,12 +4,14 @@ import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { Pool } from 'pg';
 import { AppModule } from '../../src/http/app.module';
-import { HOTEL_PROVIDERS, LLM_PROVIDER, POOL } from '../../src/http/tokens';
+import { FLIGHT_PROVIDERS, HOTEL_PROVIDERS, LLM_PROVIDER, POOL } from '../../src/http/tokens';
 import { FakeLlmProvider } from '../../src/ai/fake-llm-provider';
 import { MockHotelProvider } from '../../src/providers/mock-hotel-provider';
+import { MockFlightProvider } from '../../src/providers/mock-flight-provider';
 import { getJob } from '../../src/itinerary/jobs';
 import { deleteItineraryAndJob } from '../helpers/db-cleanup';
 import type { HotelProvider, HotelSearchCriteria, NormalizedHotelOffer } from '../../src/providers/hotel-provider';
+import type { FlightProvider, NormalizedTransportOffer, TransportSearchCriteria } from '../../src/providers/transport-provider';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
@@ -189,6 +191,140 @@ describe('POST /companion/messages - hotel comparison provider failure isolation
     expect(res.body.result.offers.every((o: { provider: string }) => o.provider !== 'FailingHotelProvider')).toBe(
       true,
     );
+  });
+});
+
+class FailingFlightProvider implements FlightProvider {
+  readonly providerName = 'FailingFlightProvider';
+  async search(_criteria: TransportSearchCriteria): Promise<NormalizedTransportOffer[]> {
+    throw new Error('simulated outage');
+  }
+}
+
+describe('POST /companion/messages - transport and multi-domain comparison (Phase 5)', () => {
+  let app: INestApplication;
+
+  beforeAll(async () => {
+    const llm = new FakeLlmProvider(JSON.stringify({ narrative: 'A short comparison.', highlights: [] }));
+
+    const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+      .overrideProvider(LLM_PROVIDER)
+      .useValue(llm)
+      .overrideProvider(POOL)
+      .useValue(pool)
+      .compile();
+
+    app = moduleRef.createNestApplication();
+    await app.init();
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  it('1. a transport comparison request works over HTTP', async () => {
+    const res = await request(app.getHttpServer()).post('/companion/messages').send({
+      message: 'Compare flights from Pune to Delhi',
+      comparisonDomains: ['flight'],
+      transportOrigin: 'Pune',
+      transportDestination: 'Delhi',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.route).toBe('comparison');
+    expect(res.body.result.domains).toEqual(['flight']);
+    expect(res.body.result.offers.every((o: { domain: string }) => o.domain === 'flight')).toBe(true);
+    for (const offer of res.body.result.offers) {
+      expect(offer).not.toHaveProperty('raw');
+    }
+  });
+
+  it('2. a multi-domain comparison request (hotel + flight) works over HTTP in one call', async () => {
+    const res = await request(app.getHttpServer()).post('/companion/messages').send({
+      message: 'Compare hotels and flights for my Delhi trip',
+      comparisonDomains: ['hotel', 'flight'],
+      hotelSearchLocation: 'Karol Bagh',
+      transportOrigin: 'Pune',
+      transportDestination: 'Delhi',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.route).toBe('comparison');
+    expect(res.body.result.domains).toEqual(['hotel', 'flight']);
+    expect(res.body.result.offers.some((o: { domain: string }) => o.domain === 'hotel')).toBe(true);
+    expect(res.body.result.offers.some((o: { domain: string }) => o.domain === 'flight')).toBe(true);
+
+    const taskRow = await pool.query('select result from tasks where id = $1', [res.body.taskId]);
+    expect(taskRow.rows[0].result.offers).toEqual(res.body.result.offers);
+  });
+
+  it('4. cancellation-policy lookup works over HTTP for a persisted hotel offer', async () => {
+    const compareRes = await request(app.getHttpServer()).post('/companion/messages').send({
+      message: 'Compare hotels near Karol Bagh',
+      hotelSearchLocation: 'Karol Bagh',
+    });
+    const hotelOfferId = compareRes.body.result.offers[0].offerId;
+
+    const res = await request(app.getHttpServer()).post('/companion/messages').send({
+      message: 'What is the cancellation policy?',
+      conversationId: compareRes.body.conversationId,
+      cancellationPolicyOfferId: hotelOfferId,
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.route).toBe('cancellation_policy');
+    expect(res.body.result.status).toBe('known');
+    expect(res.body.result.policy).toBeTruthy();
+  });
+
+  it('an unsupported comparisonDomains value is rejected by DTO validation before reaching the agent', async () => {
+    const res = await request(app.getHttpServer()).post('/companion/messages').send({
+      message: 'Compare something',
+      comparisonDomains: ['boat'],
+      transportOrigin: 'Pune',
+      transportDestination: 'Delhi',
+    });
+    expect(res.status).toBe(400);
+  });
+});
+
+describe('POST /companion/messages - transport provider failure isolation across domains (Phase 5)', () => {
+  let app: INestApplication;
+
+  beforeAll(async () => {
+    const llm = new FakeLlmProvider(JSON.stringify({ narrative: 'Comparison with a partial flight outage.', highlights: [] }));
+    const flightProviders: FlightProvider[] = [new MockFlightProvider(), new FailingFlightProvider()];
+
+    const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+      .overrideProvider(LLM_PROVIDER)
+      .useValue(llm)
+      .overrideProvider(POOL)
+      .useValue(pool)
+      .overrideProvider(FLIGHT_PROVIDERS)
+      .useValue(flightProviders)
+      .compile();
+
+    app = moduleRef.createNestApplication();
+    await app.init();
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  it('3. a failing flight provider produces partial flight results, and does not affect the hotel domain in the same request', async () => {
+    const res = await request(app.getHttpServer()).post('/companion/messages').send({
+      message: 'Compare hotels and flights',
+      comparisonDomains: ['hotel', 'flight'],
+      hotelSearchLocation: 'Karol Bagh',
+      transportOrigin: 'Pune',
+      transportDestination: 'Delhi',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.result.failedProviders).toEqual(['FailingFlightProvider']);
+    expect(res.body.result.offers.some((o: { domain: string }) => o.domain === 'hotel')).toBe(true);
+    expect(res.body.result.offers.some((o: { domain: string }) => o.domain === 'flight')).toBe(true);
   });
 });
 

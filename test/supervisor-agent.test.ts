@@ -217,7 +217,7 @@ describe('routeMessage (Supervisor Agent)', () => {
   it('an ordinal follow-up with no prior completed comparison task in the conversation is never guessed', async () => {
     await expect(
       routeMessage(pool, noopLlm(), { message: 'I like the second one.' }),
-    ).rejects.toThrow(/don't have a completed hotel comparison/);
+    ).rejects.toThrow(/don't have a completed comparison/);
   });
 
   it('an ordinal follow-up outside the persisted result set is never guessed', async () => {
@@ -227,7 +227,7 @@ describe('routeMessage (Supervisor Agent)', () => {
       pool,
       noopLlm(),
       { message: 'Compare hotels near Karol Bagh', hotelSearchLocation: 'Karol Bagh' },
-      [],
+      { hotel: [] },
     );
     if (comparison.route !== 'comparison') throw new Error('unreachable');
     expect(comparison.result.offers).toEqual([]);
@@ -238,5 +238,98 @@ describe('routeMessage (Supervisor Agent)', () => {
         conversationId: comparison.conversationId,
       }),
     ).rejects.toThrow(/no option #1/);
+  });
+
+  it('routes a transport comparison request (transportOrigin/transportDestination + comparisonDomains) to the Comparison Agent', async () => {
+    const result = await routeMessage(pool, noopLlm(), {
+      message: 'Compare flights from Pune to Delhi',
+      comparisonDomains: ['flight'],
+      transportOrigin: 'Pune',
+      transportDestination: 'Delhi',
+    });
+
+    expect(result.route).toBe('comparison');
+    if (result.route !== 'comparison') throw new Error('unreachable');
+    expect(result.result.domains).toEqual(['flight']);
+    expect(result.result.offers.every((o) => o.domain === 'flight')).toBe(true);
+  });
+
+  it('routes a multi-domain comparison request (hotel + flight together) to the Comparison Agent in one call', async () => {
+    const result = await routeMessage(pool, noopLlm(), {
+      message: 'Compare hotels and flights for my Delhi trip',
+      comparisonDomains: ['hotel', 'flight'],
+      hotelSearchLocation: 'Karol Bagh',
+      transportOrigin: 'Pune',
+      transportDestination: 'Delhi',
+    });
+
+    expect(result.route).toBe('comparison');
+    if (result.route !== 'comparison') throw new Error('unreachable');
+    expect(result.result.domains).toEqual(['hotel', 'flight']);
+    expect(result.result.offers.some((o) => o.domain === 'hotel')).toBe(true);
+    expect(result.result.offers.some((o) => o.domain === 'flight')).toBe(true);
+  });
+
+  it('a comparisonDomains request missing required transport criteria does not guess - it errors clearly', async () => {
+    await expect(
+      routeMessage(pool, noopLlm(), {
+        message: 'Compare flights',
+        comparisonDomains: ['flight'],
+        // transportOrigin/transportDestination deliberately omitted
+      }),
+    ).rejects.toThrow(/requires an origin and a destination/);
+  });
+
+  it('an unsupported comparisonDomains value is rejected explicitly, never silently ignored', async () => {
+    await expect(
+      routeMessage(pool, noopLlm(), {
+        message: 'Compare something',
+        // @ts-expect-error - deliberately invalid at the type level too; DTO-level @IsIn would also reject this over real HTTP
+        comparisonDomains: ['boat'],
+        transportOrigin: 'Pune',
+        transportDestination: 'Delhi',
+      }),
+    ).rejects.toThrow(/Unsupported comparison domain/);
+  });
+
+  it('a cancellationPolicyOfferId request routes to the cancellation-policy tool and returns a known structured policy for a hotel offer', async () => {
+    const comparison = await routeMessage(pool, noopLlm(), {
+      message: 'Compare hotels near Karol Bagh',
+      hotelSearchLocation: 'Karol Bagh',
+    });
+    if (comparison.route !== 'comparison') throw new Error('unreachable');
+    const hotelOfferId = comparison.result.offers[0].offerId;
+
+    const result = await routeMessage(pool, noopLlm(), {
+      message: 'What is the cancellation policy?',
+      conversationId: comparison.conversationId,
+      cancellationPolicyOfferId: hotelOfferId,
+    });
+
+    expect(result.route).toBe('cancellation_policy');
+    if (result.route !== 'cancellation_policy') throw new Error('unreachable');
+    expect(result.result.status).toBe('known');
+    expect(result.result.policy).toBeTruthy();
+  });
+
+  it('a cancellationPolicyOfferId for an unknown offer honestly reports unavailable rather than fabricating a policy', async () => {
+    const result = await routeMessage(pool, noopLlm(), {
+      message: 'What is the cancellation policy?',
+      cancellationPolicyOfferId: 'totally-unknown-offer-id',
+    });
+
+    expect(result.route).toBe('cancellation_policy');
+    if (result.route !== 'cancellation_policy') throw new Error('unreachable');
+    expect(result.result.status).toBe('unavailable');
+  });
+
+  it('existing hotel-only comparison routing (hotelSearchLocation alone, no comparisonDomains) is unchanged from Phase 4', async () => {
+    const result = await routeMessage(pool, noopLlm(), {
+      message: 'Compare hotels near Karol Bagh',
+      hotelSearchLocation: 'Karol Bagh',
+    });
+    expect(result.route).toBe('comparison');
+    if (result.route !== 'comparison') throw new Error('unreachable');
+    expect(result.result.domains).toEqual(['hotel']);
   });
 });

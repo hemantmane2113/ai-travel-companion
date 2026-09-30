@@ -2,7 +2,18 @@ import { BadRequestException, Body, Controller, HttpCode, Inject, Post } from '@
 import type { Pool } from 'pg';
 import type { LlmProvider } from '../ai/llm-provider';
 import type { HotelProvider } from '../providers/hotel-provider';
-import { HOTEL_PROVIDERS, LLM_PROVIDER, POOL } from './tokens';
+import type { BusProvider, FlightProvider, TrainProvider } from '../providers/transport-provider';
+import type { ProviderRateLimiter } from '../rate-limit/provider-rate-limiter';
+import type { ComparisonProviders } from '../agents/comparison-agent';
+import {
+  BUS_PROVIDERS,
+  FLIGHT_PROVIDERS,
+  HOTEL_PROVIDERS,
+  LLM_PROVIDER,
+  POOL,
+  PROVIDER_RATE_LIMITER,
+  TRAIN_PROVIDERS,
+} from './tokens';
 import { CompanionMessageDto } from './dto/companion-message.dto';
 import { validateDto } from './validate-dto';
 import { routeMessage, type CompanionResult } from '../agents/supervisor-agent';
@@ -10,10 +21,11 @@ import { routeMessage, type CompanionResult } from '../agents/supervisor-agent';
 /**
  * The Phase 2 companion entry point (docs/architecture-v2-agent-companion.md
  * §N Phase 2): one conversational endpoint, routed by the deterministic
- * Supervisor to either the existing itinerary pipeline or the new Q&A
- * capability. Does not replace or modify ItinerariesController - the
- * existing /itineraries API is untouched and still behaves exactly as
- * before; this is a new, additional entry point.
+ * Supervisor to the existing itinerary pipeline, the Comparison Agent
+ * (Phase 4/5), the cancellation-policy tool, or the Q&A capability. Does
+ * not replace or modify ItinerariesController - the existing /itineraries
+ * API is untouched and still behaves exactly as before; this is a new,
+ * additional entry point.
  */
 @Controller('companion')
 export class CompanionController {
@@ -21,14 +33,24 @@ export class CompanionController {
     @Inject(POOL) private readonly pool: Pool,
     @Inject(LLM_PROVIDER) private readonly llmProvider: LlmProvider,
     @Inject(HOTEL_PROVIDERS) private readonly hotelProviders: HotelProvider[],
+    @Inject(FLIGHT_PROVIDERS) private readonly flightProviders: FlightProvider[],
+    @Inject(TRAIN_PROVIDERS) private readonly trainProviders: TrainProvider[],
+    @Inject(BUS_PROVIDERS) private readonly busProviders: BusProvider[],
+    @Inject(PROVIDER_RATE_LIMITER) private readonly rateLimiter: ProviderRateLimiter,
   ) {}
 
   @Post('messages')
   @HttpCode(200)
   async postMessage(@Body() body: unknown): Promise<CompanionResult> {
     const dto = await validateDto(CompanionMessageDto, body);
+    const comparisonProviders: ComparisonProviders = {
+      hotel: this.hotelProviders,
+      flight: this.flightProviders,
+      train: this.trainProviders,
+      bus: this.busProviders,
+    };
     try {
-      return await routeMessage(this.pool, this.llmProvider, dto, this.hotelProviders);
+      return await routeMessage(this.pool, this.llmProvider, dto, comparisonProviders, this.rateLimiter);
     } catch (err) {
       throw new BadRequestException(err instanceof Error ? err.message : 'Invalid request');
     }

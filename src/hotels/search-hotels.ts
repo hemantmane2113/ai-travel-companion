@@ -1,54 +1,21 @@
 import type { HotelProvider, HotelSearchCriteria, NormalizedHotelOffer } from '../providers/hotel-provider';
+import { fanOutProviderSearch, type FanOutResult } from '../providers/provider-fan-out';
+import type { ProviderRateLimiter } from '../rate-limit/provider-rate-limiter';
 
-export interface SearchHotelsResult {
-  offers: NormalizedHotelOffer[];
-  /** Provider names whose search call failed or timed out - the caller still gets every other provider's offers (plan §E/§L: one provider failure must never fail the whole comparison). */
-  failedProviders: string[];
-}
-
-const PROVIDER_TIMEOUT_MS = 5000;
-
-function withTimeout<T>(promise: Promise<T>, ms: number, providerName: string): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<T>((_, reject) => {
-      setTimeout(() => reject(new Error(`${providerName} timed out after ${ms}ms`)), ms);
-    }),
-  ]);
-}
+export type SearchHotelsResult = FanOutResult<NormalizedHotelOffer>;
 
 /**
- * The "Hotel Search Tool" (plan §D): fans a search out across every
- * registered HotelProvider in parallel via Promise.allSettled, so one
- * slow/failed provider never blocks or fails the others (plan §E/§L,
- * same isolation principle the architecture requires for multi-domain
- * transport search later). Only one provider exists today
- * (MockHotelProvider), but the fan-out shape already supports
- * `HotelProvider[]` with no interface change needed when a second
- * provider is added.
- *
- * This function does no normalization itself - every HotelProvider
- * already returns normalized offers (same boundary PlacesProvider
- * draws) - and does no comparison; it only gathers and isolates.
+ * The "Hotel Search Tool" (plan §D) - a thin, domain-named wrapper over
+ * the shared provider-fan-out primitive (src/providers/provider-fan-out.ts,
+ * extracted in Phase 5). This function does no normalization itself -
+ * every HotelProvider already returns normalized offers - and does no
+ * comparison; it only gathers and isolates (failures, timeouts, and now
+ * rate limits alike).
  */
 export async function searchHotels(
   providers: HotelProvider[],
   criteria: HotelSearchCriteria,
+  rateLimiter?: ProviderRateLimiter,
 ): Promise<SearchHotelsResult> {
-  const results = await Promise.allSettled(
-    providers.map((provider) => withTimeout(provider.search(criteria), PROVIDER_TIMEOUT_MS, provider.providerName)),
-  );
-
-  const offers: NormalizedHotelOffer[] = [];
-  const failedProviders: string[] = [];
-
-  results.forEach((result, index) => {
-    if (result.status === 'fulfilled') {
-      offers.push(...result.value);
-    } else {
-      failedProviders.push(providers[index].providerName);
-    }
-  });
-
-  return { offers, failedProviders };
+  return fanOutProviderSearch(providers, criteria, { rateLimiter });
 }

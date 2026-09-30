@@ -4,8 +4,12 @@ import { runComparison } from '../src/agents/comparison-agent';
 import { createConversation } from '../src/companion/conversations';
 import { getTask } from '../src/tasks/tasks';
 import { MockHotelProvider } from '../src/providers/mock-hotel-provider';
+import { MockFlightProvider } from '../src/providers/mock-flight-provider';
+import { MockTrainProvider } from '../src/providers/mock-train-provider';
+import { MockBusProvider } from '../src/providers/mock-bus-provider';
 import { FakeLlmProvider } from '../src/ai/fake-llm-provider';
 import type { HotelProvider, HotelSearchCriteria, NormalizedHotelOffer } from '../src/providers/hotel-provider';
+import type { FlightProvider, NormalizedTransportOffer, TransportSearchCriteria } from '../src/providers/transport-provider';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
@@ -62,8 +66,8 @@ describe('runComparison (Comparison Agent)', () => {
 
     await expect(
       runComparison(pool, new FakeLlmProvider('{}'), {
-        // @ts-expect-error - deliberately passing an unsupported domain to prove the runtime guard, not just the type system
-        domains: ['flight'],
+        // @ts-expect-error - deliberately passing a genuinely unsupported domain to prove the runtime guard, not just the type system (all four real Domain values are supported as of Phase 5)
+        domains: ['boat'],
         location: 'Karol Bagh',
         conversationId,
       }),
@@ -78,7 +82,7 @@ describe('runComparison (Comparison Agent)', () => {
       domains: ['hotel'],
       location: 'Karol Bagh',
       conversationId,
-      providers: [new MockHotelProvider(), new FailingHotelProvider()],
+      providers: { hotel: [new MockHotelProvider(), new FailingHotelProvider()] },
     });
 
     expect(result.failedProviders).toEqual(['FailingHotelProvider']);
@@ -117,5 +121,171 @@ describe('runComparison (Comparison Agent)', () => {
     expect(result.fellBackToDeterministic).toBe(true);
     expect(result.narrative).not.toMatch(/does not exist/);
     expect(result.narrative).toMatch(/Found \d+ hotel offer\(s\)/);
+  });
+});
+
+class FailingFlightProvider implements FlightProvider {
+  readonly providerName = 'FailingFlightProvider';
+  async search(_criteria: TransportSearchCriteria): Promise<NormalizedTransportOffer[]> {
+    throw new Error('simulated outage');
+  }
+}
+
+describe('runComparison - multi-domain (Phase 5)', () => {
+  it('flight only', async () => {
+    const conversationId = await createConversation(pool);
+    const { result } = await runComparison(pool, new FakeLlmProvider('not json'), {
+      domains: ['flight'],
+      origin: 'Pune',
+      destination: 'Delhi',
+      conversationId,
+    });
+    expect(result.domains).toEqual(['flight']);
+    expect(result.offers.length).toBeGreaterThan(0);
+    expect(result.offers.every((o) => o.domain === 'flight')).toBe(true);
+    expect(result.comparison).toHaveLength(1);
+    expect(result.comparison[0].domain).toBe('flight');
+  });
+
+  it('train only', async () => {
+    const conversationId = await createConversation(pool);
+    const { result } = await runComparison(pool, new FakeLlmProvider('not json'), {
+      domains: ['train'],
+      origin: 'Pune',
+      destination: 'Delhi',
+      conversationId,
+    });
+    expect(result.domains).toEqual(['train']);
+    expect(result.offers.every((o) => o.domain === 'train')).toBe(true);
+  });
+
+  it('bus only', async () => {
+    const conversationId = await createConversation(pool);
+    const { result } = await runComparison(pool, new FakeLlmProvider('not json'), {
+      domains: ['bus'],
+      origin: 'Pune',
+      destination: 'Delhi',
+      conversationId,
+    });
+    expect(result.domains).toEqual(['bus']);
+    expect(result.offers.every((o) => o.domain === 'bus')).toBe(true);
+  });
+
+  it('hotel + flight - both domains run independently and both appear in the merged, domain-grouped offer list', async () => {
+    const conversationId = await createConversation(pool);
+    const { result } = await runComparison(pool, new FakeLlmProvider('not json'), {
+      domains: ['hotel', 'flight'],
+      location: 'Karol Bagh',
+      origin: 'Pune',
+      destination: 'Delhi',
+      conversationId,
+    });
+
+    expect(result.domains).toEqual(['hotel', 'flight']);
+    expect(result.comparison.map((c) => c.domain)).toEqual(['hotel', 'flight']);
+
+    const hotelOffers = result.offers.filter((o) => o.domain === 'hotel');
+    const flightOffers = result.offers.filter((o) => o.domain === 'flight');
+    expect(hotelOffers.length).toBeGreaterThan(0);
+    expect(flightOffers.length).toBeGreaterThan(0);
+
+    // Domain-grouped ordering: every hotel offer appears before every flight offer (requested order).
+    const firstFlightIndex = result.offers.findIndex((o) => o.domain === 'flight');
+    const lastHotelIndex = result.offers.map((o) => o.domain).lastIndexOf('hotel');
+    expect(lastHotelIndex).toBeLessThan(firstFlightIndex);
+  });
+
+  it('flight + train', async () => {
+    const conversationId = await createConversation(pool);
+    const { result } = await runComparison(pool, new FakeLlmProvider('not json'), {
+      domains: ['flight', 'train'],
+      origin: 'Pune',
+      destination: 'Delhi',
+      conversationId,
+    });
+    expect(result.domains).toEqual(['flight', 'train']);
+    expect(result.offers.some((o) => o.domain === 'flight')).toBe(true);
+    expect(result.offers.some((o) => o.domain === 'train')).toBe(true);
+  });
+
+  it('hotel + flight + train + bus - all four domains in one request', async () => {
+    const conversationId = await createConversation(pool);
+    const { taskId, result } = await runComparison(pool, new FakeLlmProvider('not json'), {
+      domains: ['hotel', 'flight', 'train', 'bus'],
+      location: 'Karol Bagh',
+      origin: 'Pune',
+      destination: 'Delhi',
+      conversationId,
+    });
+
+    expect(result.domains).toEqual(['hotel', 'flight', 'train', 'bus']);
+    expect(result.comparison).toHaveLength(4);
+    for (const domain of ['hotel', 'flight', 'train', 'bus'] as const) {
+      expect(result.offers.some((o) => o.domain === domain)).toBe(true);
+    }
+
+    // Persisted exactly as returned (mixed-domain ordering survives round-trip).
+    const task = await getTask(pool, taskId);
+    expect((task!.result as { offers: unknown[] }).offers).toEqual(result.offers);
+  });
+
+  it('a failure in one domain\'s provider path does not discard another domain\'s successful results', async () => {
+    const conversationId = await createConversation(pool);
+    const { result } = await runComparison(pool, new FakeLlmProvider('not json'), {
+      domains: ['hotel', 'flight'],
+      location: 'Karol Bagh',
+      origin: 'Pune',
+      destination: 'Delhi',
+      conversationId,
+      providers: { flight: [new MockFlightProvider(), new FailingFlightProvider()] },
+    });
+
+    expect(result.failedProviders).toEqual(['FailingFlightProvider']);
+    expect(result.offers.some((o) => o.domain === 'hotel')).toBe(true);
+    expect(result.offers.some((o) => o.domain === 'flight')).toBe(true);
+  });
+
+  it('rejects a hotel comparison missing its required location before any task is created', async () => {
+    const conversationId = await createConversation(pool);
+    await expect(
+      runComparison(pool, new FakeLlmProvider('{}'), { domains: ['hotel'], conversationId }),
+    ).rejects.toThrow(/requires a location/);
+  });
+
+  it('rejects a transport comparison missing origin/destination before any task is created', async () => {
+    const conversationId = await createConversation(pool);
+    await expect(
+      runComparison(pool, new FakeLlmProvider('{}'), { domains: ['flight'], conversationId }),
+    ).rejects.toThrow(/requires an origin and a destination/);
+  });
+
+  it('every persisted offer has a stable offerId matching the source provider\'s own id', async () => {
+    const conversationId = await createConversation(pool);
+    const flightProvider = new MockFlightProvider();
+    const sourceOffers = await flightProvider.search({ origin: 'Pune', destination: 'Delhi' });
+
+    const { result } = await runComparison(pool, new FakeLlmProvider('not json'), {
+      domains: ['flight'],
+      origin: 'Pune',
+      destination: 'Delhi',
+      conversationId,
+    });
+
+    const sourceIds = new Set(sourceOffers.map((o) => o.offerId));
+    for (const offer of result.offers) {
+      expect(sourceIds.has(offer.offerId)).toBe(true);
+    }
+  });
+
+  it('deterministic transport narration fallback names the transport domain, not "hotel"', async () => {
+    const conversationId = await createConversation(pool);
+    const { result } = await runComparison(pool, new FakeLlmProvider('not valid json'), {
+      domains: ['flight'],
+      origin: 'Pune',
+      destination: 'Delhi',
+      conversationId,
+    });
+    expect(result.fellBackToDeterministic).toBe(true);
+    expect(result.narrative).toMatch(/Found \d+ flight offer\(s\)/);
   });
 });
