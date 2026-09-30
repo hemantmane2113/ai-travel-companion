@@ -11,7 +11,7 @@ import { MockHotelProvider } from '../providers/mock-hotel-provider';
 import { MockFlightProvider } from '../providers/mock-flight-provider';
 import { MockTrainProvider } from '../providers/mock-train-provider';
 import { MockBusProvider } from '../providers/mock-bus-provider';
-import type { Domain, HotelProvider, NormalizedHotelOffer } from '../providers/hotel-provider';
+import type { Domain, HotelProvider, HotelSearchCriteria, NormalizedHotelOffer } from '../providers/hotel-provider';
 import type {
   BusProvider,
   FlightProvider,
@@ -120,6 +120,41 @@ async function runHotelDomain(input: RunComparisonInput): Promise<DomainRunResul
     },
     failedProviders,
   };
+}
+
+export interface SearchHotelOffersOnlyResult {
+  offers: PersistedHotelOffer[];
+  cheapestOfferId: string | null;
+  failedProviders: string[];
+}
+
+/**
+ * The search-only capability (V2 architecture Phase 9/§I): the Comparison
+ * Agent's own fresh-quote step for the rebooking composite
+ * (src/agents/rebooking-agent.ts) - the same two deterministic services
+ * `runHotelDomain` already calls (`searchHotels` for provider fan-out,
+ * `compareHotelOffers` for deterministic ranking), but WITHOUT the LLM
+ * narration call or `tasks` persistence that wraps a full comparison
+ * turn. Deliberately not a refactor of `runHotelDomain` - a few
+ * duplicated lines here are safer than touching the already-tested
+ * normal comparison flow, which remains completely unchanged.
+ *
+ * No LLM call. No `comparison`-type task is ever created by this
+ * function - callers that need one still go through `runComparison`.
+ */
+export async function searchHotelOffersOnly(
+  criteria: HotelSearchCriteria,
+  providers?: HotelProvider[],
+  rateLimiter?: ProviderRateLimiter,
+): Promise<SearchHotelOffersOnlyResult> {
+  const activeProviders = providers ?? [new MockHotelProvider()];
+  const { offers, failedProviders } = await searchHotels(activeProviders, criteria, rateLimiter);
+
+  const comparison = compareHotelOffers(offers);
+  const offersById = new Map(offers.map((o) => [o.offerId, o]));
+  const orderedOffers = comparison.offers.map((co) => stripRaw(offersById.get(co.offerId)!));
+
+  return { offers: orderedOffers, cheapestOfferId: comparison.cheapestOfferId, failedProviders };
 }
 
 async function runTransportDomain(domain: TransportDomain, input: RunComparisonInput): Promise<DomainRunResult> {

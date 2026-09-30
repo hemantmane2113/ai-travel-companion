@@ -707,6 +707,136 @@ describe('routeMessage (Supervisor Agent)', () => {
     });
   });
 
+  describe('rebooking (Phase 9)', () => {
+    const trackedTaskIds: string[] = [];
+    afterAll(async () => {
+      await deleteBookingsByTaskIds(pool, trackedTaskIds);
+    });
+
+    async function bookAHotel(conversationId: string) {
+      const comparison = await routeMessage(pool, noopLlm(), {
+        message: 'Compare hotels near Karol Bagh',
+        hotelSearchLocation: 'Karol Bagh',
+        conversationId,
+      });
+      if (comparison.route !== 'comparison') throw new Error('unreachable');
+      const offerId = comparison.result.offers[0].offerId;
+
+      const intent = await routeMessage(pool, noopLlm(), {
+        message: 'Book this.',
+        conversationId,
+        bookingOfferId: offerId,
+      });
+      if (intent.route !== 'booking_intent') throw new Error('unreachable');
+      trackedTaskIds.push(intent.result.taskId);
+
+      await routeMessage(pool, noopLlm(), {
+        message: 'Confirm it.',
+        conversationId,
+        confirmBookingTaskId: intent.result.taskId,
+      });
+
+      const executed = await routeMessage(
+        pool,
+        noopLlm(),
+        { message: 'Execute it.', conversationId, executeBookingTaskId: intent.result.taskId },
+        undefined,
+        undefined,
+        new SandboxWriteProvider(),
+      );
+      if (executed.route !== 'booking_executed') throw new Error('unreachable');
+      return executed.result;
+    }
+
+    it('a rebookBookingId + rebookLocation request routes to the Rebooking Agent and returns a combined intent', async () => {
+      const conversationId = await createConversation(pool);
+      const booking = await bookAHotel(conversationId);
+
+      const result = await routeMessage(pool, noopLlm(), {
+        message: 'I want to change hotels.',
+        conversationId,
+        rebookBookingId: booking.id,
+        rebookLocation: 'Connaught Place',
+      });
+
+      expect(result.route).toBe('rebooking_intent');
+      if (result.route !== 'rebooking_intent') throw new Error('unreachable');
+      expect(result.result.originalBookingId).toBe(booking.id);
+      trackedTaskIds.push(result.result.cancellationTaskId);
+    });
+
+    it('rebookBookingId without rebookLocation is rejected with a clear error, never guessed', async () => {
+      const conversationId = await createConversation(pool);
+      const booking = await bookAHotel(conversationId);
+
+      await expect(
+        routeMessage(pool, noopLlm(), { message: 'Change my hotel.', conversationId, rebookBookingId: booking.id }),
+      ).rejects.toThrow(/requires a new search location/);
+    });
+
+    it('a confirmRebookingTaskId request confirms and executes the whole cancel-and-rebook composite in one route', async () => {
+      const conversationId = await createConversation(pool);
+      const booking = await bookAHotel(conversationId);
+
+      const intent = await routeMessage(pool, noopLlm(), {
+        message: 'Change my hotel.',
+        conversationId,
+        rebookBookingId: booking.id,
+        rebookLocation: 'Connaught Place',
+      });
+      if (intent.route !== 'rebooking_intent') throw new Error('unreachable');
+      trackedTaskIds.push(intent.result.cancellationTaskId);
+
+      const provider = new SandboxWriteProvider();
+      const result = await routeMessage(
+        pool,
+        noopLlm(),
+        { message: 'Yes, confirmed.', conversationId, confirmRebookingTaskId: intent.result.taskId },
+        undefined,
+        undefined,
+        provider,
+      );
+
+      expect(result.route).toBe('rebooking_executed');
+      if (result.route !== 'rebooking_executed') throw new Error('unreachable');
+      expect(result.result.outcome).toBe('completed');
+      if (result.result.newBooking) trackedTaskIds.push(result.result.newBooking.taskId);
+    });
+
+    it('saying "cancel it, rebook it, yes, go ahead" as free text never triggers rebooking without the exact confirmRebookingTaskId', async () => {
+      const conversationId = await createConversation(pool);
+      const booking = await bookAHotel(conversationId);
+
+      const intent = await routeMessage(pool, noopLlm(), {
+        message: 'Cancel it, rebook it, yes, go ahead, I am sure.',
+        conversationId,
+        rebookBookingId: booking.id,
+        rebookLocation: 'Connaught Place',
+      });
+      if (intent.route !== 'rebooking_intent') throw new Error('unreachable');
+      trackedTaskIds.push(intent.result.cancellationTaskId);
+      expect(intent.result.rebookingStatus).toBe('awaiting_confirmation');
+
+      const stillNothing = await routeMessage(pool, noopLlm(), {
+        message: 'Cancel it, rebook it, yes, go ahead, I am sure.',
+        conversationId,
+      });
+      expect(stillNothing.route).toBe('qa');
+    });
+
+    it('existing booking-execution and cancellation routes remain unchanged by the new rebooking routes', async () => {
+      const conversationId = await createConversation(pool);
+      const booking = await bookAHotel(conversationId);
+
+      const cancelIntent = await routeMessage(pool, noopLlm(), {
+        message: 'Cancel it.',
+        conversationId,
+        cancelBookingId: booking.id,
+      });
+      expect(cancelIntent.route).toBe('cancellation_intent');
+    });
+  });
+
   it('a knowledge-oriented question ("visa requirements") reaches Q&A, not comparison/booking, and is answered honestly when nothing matches', async () => {
     // A nonsense term guarantees this AND-query can never accidentally
     // match another concurrently-running test file's own temporary

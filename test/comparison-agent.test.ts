@@ -1,8 +1,8 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import { Pool } from 'pg';
-import { runComparison } from '../src/agents/comparison-agent';
+import { runComparison, searchHotelOffersOnly } from '../src/agents/comparison-agent';
 import { createConversation } from '../src/companion/conversations';
-import { getTask } from '../src/tasks/tasks';
+import { getTask, getLatestTaskForConversation } from '../src/tasks/tasks';
 import { MockHotelProvider } from '../src/providers/mock-hotel-provider';
 import { MockFlightProvider } from '../src/providers/mock-flight-provider';
 import { MockTrainProvider } from '../src/providers/mock-train-provider';
@@ -287,5 +287,42 @@ describe('runComparison - multi-domain (Phase 5)', () => {
     });
     expect(result.fellBackToDeterministic).toBe(true);
     expect(result.narrative).toMatch(/Found \d+ flight offer\(s\)/);
+  });
+});
+
+describe('searchHotelOffersOnly (Phase 9 search-only capability)', () => {
+  it('returns normalized, ranked offers with a deterministic cheapest selection, never invoking an LLM', async () => {
+    const provider = new MockHotelProvider();
+    const rawOffers = await provider.search({ location: 'Karol Bagh' });
+
+    const result = await searchHotelOffersOnly({ location: 'Karol Bagh' }, [provider]);
+
+    expect(result.offers.length).toBe(rawOffers.length);
+    expect(result.cheapestOfferId).toBeTruthy();
+    const cheapest = result.offers.find((o) => o.offerId === result.cheapestOfferId)!;
+    expect(Math.min(...result.offers.filter((o) => o.availability).map((o) => o.price))).toBe(cheapest.price);
+  });
+
+  it('never persists a comparison task - the conversation has none after calling it', async () => {
+    const conversationId = await createConversation(pool);
+    await searchHotelOffersOnly({ location: 'Karol Bagh' }, [new MockHotelProvider()]);
+
+    const latest = await getLatestTaskForConversation(pool, conversationId, 'comparison');
+    expect(latest).toBeNull();
+  });
+
+  it('isolates a provider failure - a failing provider never breaks the search, and its offers are simply absent', async () => {
+    const result = await searchHotelOffersOnly({ location: 'Karol Bagh' }, [
+      new MockHotelProvider(),
+      new FailingHotelProvider(),
+    ]);
+
+    expect(result.failedProviders).toContain('FailingHotelProvider');
+    expect(result.offers.every((o) => o.provider !== 'FailingHotelProvider')).toBe(true);
+  });
+
+  it('strips the raw provider payload from every returned offer', async () => {
+    const result = await searchHotelOffersOnly({ location: 'Karol Bagh' }, [new MockHotelProvider()]);
+    expect(result.offers.every((o) => !('raw' in o))).toBe(true);
   });
 });

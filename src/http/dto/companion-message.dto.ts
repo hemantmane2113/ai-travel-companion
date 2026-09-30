@@ -140,4 +140,29 @@ export class CompanionMessageDto {
   @IsOptional()
   @IsUUID()
   confirmCancellationTaskId?: string;
+
+  // Structured rebooking-request trigger (Phase 9) - the EXACT id of an
+  // existing hotel `bookings` row to cancel-and-rebook, paired with a
+  // new search location for the fresh quote (src/agents/rebooking-agent.ts).
+  // Never inferred from free text; both fields are required together,
+  // mirroring the existing hotelSearchLocation/transportOrigin pairing
+  // convention.
+  @IsOptional()
+  @IsUUID()
+  rebookBookingId?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  rebookLocation?: string;
+
+  // Structured rebooking-confirmation trigger (Phase 9) - the EXACT
+  // taskId a prior rebooking-request response returned. Confirms AND
+  // executes the whole cancel-and-rebook composite in one request -
+  // never satisfied by "cancel it"/"yes"/"go ahead"/any other free
+  // text, and never a second, separate confirmation for the new
+  // booking half (plan §I).
+  @IsOptional()
+  @IsUUID()
+  confirmRebookingTaskId?: string;
 }

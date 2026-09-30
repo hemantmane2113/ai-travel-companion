@@ -13,6 +13,7 @@ import { getCancellationPolicy, type CancellationPolicyResult } from '../tasks/g
 import { createBookingIntent, confirmBookingIntent, type BookingIntentResult } from '../booking/booking-intent';
 import { executeBookingIntent } from './booking-agent';
 import { createCancellationIntent, confirmCancellationIntent, executeCancellationIntent, type CancellationIntentResult } from './cancellation-agent';
+import { createRebookingIntent, confirmRebookingIntent, executeRebookingIntent, type RebookingIntentResult, type RebookingExecutionResult } from './rebooking-agent';
 import type { BookingRow } from '../booking/bookings';
 
 export interface CompanionInput {
@@ -50,6 +51,12 @@ export interface CompanionInput {
   cancelBookingId?: string;
   /** Structured cancellation-confirmation trigger (Phase 8) - the EXACT taskId a prior cancellation-request response returned. Confirms AND executes the cancellation in one route (src/agents/cancellation-agent.ts) - never inferred from "cancel it"/"yes"/"go ahead". */
   confirmCancellationTaskId?: string;
+  /** Structured rebooking-request trigger (Phase 9) - the EXACT id of an existing hotel booking to cancel-and-rebook. Required together with rebookLocation. */
+  rebookBookingId?: string;
+  /** The new search location for the rebooking's fresh quote (Phase 9) - required together with rebookBookingId. */
+  rebookLocation?: string;
+  /** Structured rebooking-confirmation trigger (Phase 9) - the EXACT taskId a prior rebooking-request response returned. Confirms AND executes the whole cancel-and-rebook composite (src/agents/rebooking-agent.ts) - never inferred from free text. */
+  confirmRebookingTaskId?: string;
 }
 
 export type CompanionResult =
@@ -62,6 +69,8 @@ export type CompanionResult =
   | { route: 'booking_executed'; conversationId: string; result: BookingRow }
   | { route: 'cancellation_intent'; conversationId: string; result: CancellationIntentResult }
   | { route: 'cancellation_executed'; conversationId: string; result: BookingRow }
+  | { route: 'rebooking_intent'; conversationId: string; result: RebookingIntentResult }
+  | { route: 'rebooking_executed'; conversationId: string; result: RebookingExecutionResult }
   | {
       route: 'ordinal_selection';
       conversationId: string;
@@ -137,9 +146,10 @@ async function resolveOrdinalSelection(
  *
  * Route priority: full trip > comparison > cancellation policy (offer
  * lookup) > confirm booking > execute booking > confirm+execute
- * cancellation > create cancellation intent > create booking intent >
- * ordinal follow-up > Q&A. All but Q&A are structured/pattern signals
- * checked in that fixed order; Q&A is the default when none matches.
+ * cancellation > confirm+execute rebooking > create cancellation intent >
+ * create rebooking intent > create booking intent > ordinal follow-up >
+ * Q&A. All but Q&A are structured/pattern signals checked in that fixed
+ * order; Q&A is the default when none matches.
  *
  * Note the two distinctly-named, unrelated "cancellation" routes:
  * `cancellationPolicyOfferId` (Phase 5/6) looks up a policy for a
@@ -272,6 +282,36 @@ export async function routeMessage(
       status: result.status,
     });
     return { route: 'cancellation_executed', conversationId, result };
+  }
+
+  if (input.confirmRebookingTaskId) {
+    if (!writeProvider) {
+      throw new Error('No booking write provider is configured - cannot execute a rebooking.');
+    }
+    await confirmRebookingIntent(pool, conversationId, input.confirmRebookingTaskId);
+    const result = await executeRebookingIntent(pool, writeProvider, conversationId, input.confirmRebookingTaskId);
+    await appendMessage(pool, conversationId, 'assistant', result.message, {
+      route: 'rebooking_executed',
+      taskId: result.taskId,
+      outcome: result.outcome,
+    });
+    return { route: 'rebooking_executed', conversationId, result };
+  }
+
+  if (input.rebookBookingId) {
+    if (!input.rebookLocation) {
+      throw new Error('Rebooking requires a new search location (rebookLocation).');
+    }
+    const result = await createRebookingIntent(pool, conversationId, input.rebookBookingId, input.rebookLocation);
+    const feeText = result.cancellationConsequences.refundStatus === 'unavailable' ? 'unavailable' : String(result.cancellationConsequences.refund);
+    await appendMessage(
+      pool,
+      conversationId,
+      'assistant',
+      `Cancelling your existing booking: ${result.cancellationPolicy.policy ?? 'policy unavailable'} (fee/refund: ${feeText}). The new option costs ${result.newOffer.price} ${result.newOffer.currency} via ${result.newOffer.provider} - net cost unavailable. Reply with confirmRebookingTaskId "${result.taskId}" to confirm.`,
+      { route: 'rebooking_intent', taskId: result.taskId },
+    );
+    return { route: 'rebooking_intent', conversationId, result };
   }
 
   if (input.cancelBookingId) {
