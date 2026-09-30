@@ -22,9 +22,24 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      # Phase 5 introduced Redis-backed provider rate limiting
+      # (src/rate-limit/) with tests that connect to a real Redis
+      # instance - this service container was missing, which is why
+      # those tests hung until ioredis's connection retries/test
+      # timeouts were exhausted in CI.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
 
     env:
       DATABASE_URL: postgres://travel:travel@localhost:5432/travel_companion
+      REDIS_URL: redis://localhost:6379
 
     steps:
       - uses: actions/checkout@v4
