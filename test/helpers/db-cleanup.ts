@@ -91,3 +91,14 @@ export async function deleteKnowledgeDocumentsByIds(pool: Pool, ids: string[]): 
   if (ids.length === 0) return;
   await pool.query('delete from knowledge_documents where id = any($1::uuid[])', [ids]);
 }
+
+/**
+ * Test-only helper: removes bookings rows by exact task id (booking_events
+ * cascade automatically via their FK to bookings.id). Callers must pass
+ * exact tracked task ids, never a broad conversation/provider query -
+ * same discipline as deleteKnowledgeDocumentsByIds.
+ */
+export async function deleteBookingsByTaskIds(pool: Pool, taskIds: string[]): Promise<void> {
+  if (taskIds.length === 0) return;
+  await pool.query('delete from bookings where task_id = any($1::uuid[])', [taskIds]);
+}

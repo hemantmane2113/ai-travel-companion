@@ -110,4 +110,13 @@ export class CompanionMessageDto {
   @IsOptional()
   @IsUUID()
   confirmBookingTaskId?: string;
+
+  // Structured booking-execution trigger (Phase 7) - the EXACT taskId of
+  // an already-CONFIRMED booking intent (src/agents/booking-agent.ts).
+  // Never inferred from free text; the Booking Agent itself re-verifies
+  // bookingStatus === 'confirmed' regardless of routing, so this field
+  // alone can never execute an unconfirmed or merely-prepared booking.
+  @IsOptional()
+  @IsUUID()
+  executeBookingTaskId?: string;
 }

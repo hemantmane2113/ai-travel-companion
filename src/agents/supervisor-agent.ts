@@ -1,6 +1,7 @@
 import type { Pool } from 'pg';
 import type { LlmProvider } from '../ai/llm-provider';
 import type { Domain } from '../providers/hotel-provider';
+import type { WriteProvider } from '../providers/write-provider';
 import type { ProviderRateLimiter } from '../rate-limit/provider-rate-limiter';
 import { planTrip } from './planning-agent';
 import { runComparison, type ComparisonProviders, type ComparisonTaskResult } from './comparison-agent';
@@ -10,6 +11,8 @@ import { appendMessage, createConversation, requireConversation } from '../compa
 import { getLatestTaskForConversation } from '../tasks/tasks';
 import { getCancellationPolicy, type CancellationPolicyResult } from '../tasks/get-cancellation-policy';
 import { createBookingIntent, confirmBookingIntent, type BookingIntentResult } from '../booking/booking-intent';
+import { executeBookingIntent } from './booking-agent';
+import type { BookingRow } from '../booking/bookings';
 
 export interface CompanionInput {
   message: string;
@@ -40,6 +43,8 @@ export interface CompanionInput {
   bookingOfferId?: string;
   /** Structured booking-confirmation trigger (Phase 6) - the EXACT taskId a prior booking-intent response returned. This exact-id requirement IS the explicit confirmation mechanism (plan §I) - never inferred from sentiment, and never satisfied by anything else. */
   confirmBookingTaskId?: string;
+  /** Structured booking-execution trigger (Phase 7) - the EXACT taskId of an already-CONFIRMED booking intent. Dispatches to the Booking Agent (src/agents/booking-agent.ts), which re-verifies confirmation itself regardless of this route being reached. Never inferred from free text. */
+  executeBookingTaskId?: string;
 }
 
 export type CompanionResult =
@@ -49,6 +54,7 @@ export type CompanionResult =
   | { route: 'cancellation_policy'; conversationId: string; result: CancellationPolicyResult }
   | { route: 'booking_intent'; conversationId: string; result: BookingIntentResult }
   | { route: 'booking_confirmed'; conversationId: string; result: BookingIntentResult }
+  | { route: 'booking_executed'; conversationId: string; result: BookingRow }
   | {
       route: 'ordinal_selection';
       conversationId: string;
@@ -123,9 +129,9 @@ async function resolveOrdinalSelection(
  * this is the explicit confirmation boundary itself, not a convenience.
  *
  * Route priority: full trip > comparison > cancellation policy > confirm
- * booking > create booking intent > ordinal follow-up > Q&A. All but Q&A
- * are structured/pattern signals checked in that fixed order; Q&A is the
- * default when none matches.
+ * booking > execute booking > create booking intent > ordinal follow-up >
+ * Q&A. All but Q&A are structured/pattern signals checked in that fixed
+ * order; Q&A is the default when none matches.
  */
 export async function routeMessage(
   pool: Pool,
@@ -135,6 +141,8 @@ export async function routeMessage(
   comparisonProviders?: ComparisonProviders,
   /** Injectable - omit to skip rate limiting entirely. */
   rateLimiter?: ProviderRateLimiter,
+  /** The Booking Agent's WriteProvider (Phase 7). Required only when `executeBookingTaskId` is actually supplied - omitted in every test/route that never reaches that branch. Deliberately NOT defaulted to a freshly-constructed provider here: a fresh instance would have an empty idempotency cache, silently weakening the provider-side idempotency guarantee (plan §I) that only holds if the SAME provider instance is reused across requests (src/http/core.module.ts registers it as a singleton for exactly this reason). */
+  writeProvider?: WriteProvider,
 ): Promise<CompanionResult> {
   const conversationId = input.conversationId
     ? await requireConversation(pool, input.conversationId)
@@ -212,6 +220,25 @@ export async function routeMessage(
       taskId: result.taskId,
     });
     return { route: 'booking_confirmed', conversationId, result };
+  }
+
+  if (input.executeBookingTaskId) {
+    if (!writeProvider) {
+      throw new Error('No booking write provider is configured - cannot execute a booking.');
+    }
+    const result = await executeBookingIntent(pool, writeProvider, conversationId, input.executeBookingTaskId);
+    const text =
+      result.status === 'booked'
+        ? `Booked! Your ${result.provider} booking reference is ${result.externalBookingId}.`
+        : result.status === 'failed'
+          ? `I wasn't able to complete this booking with ${result.provider} - it has not been booked.`
+          : `Your booking with ${result.provider} is still being processed.`;
+    await appendMessage(pool, conversationId, 'assistant', text, {
+      route: 'booking_executed',
+      bookingId: result.id,
+      status: result.status,
+    });
+    return { route: 'booking_executed', conversationId, result };
   }
 
   if (input.bookingOfferId) {

@@ -10,3 +10,5 @@ export const TRAIN_PROVIDERS = Symbol('TRAIN_PROVIDERS');
 export const BUS_PROVIDERS = Symbol('BUS_PROVIDERS');
 /** The Comparison Agent's ProviderRateLimiter (Phase 5) - same DI seam pattern. */
 export const PROVIDER_RATE_LIMITER = Symbol('PROVIDER_RATE_LIMITER');
+/** The Booking Agent's WriteProvider (Phase 7) - same DI seam pattern as HOTEL_PROVIDERS. Bound to a single sandbox instance (src/http/core.module.ts) so its provider-side idempotency cache survives across requests, exactly as a real provider's own idempotency-key store would. */
+export const WRITE_PROVIDER = Symbol('WRITE_PROVIDER');

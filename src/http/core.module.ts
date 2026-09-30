@@ -13,6 +13,8 @@ import { MockBusProvider } from '../providers/mock-bus-provider';
 import { RedisRateLimiterStore } from '../rate-limit/redis-rate-limiter-store';
 import { ProviderRateLimiter } from '../rate-limit/provider-rate-limiter';
 import { loadRateLimiterConfigFromEnv } from '../rate-limit/config';
+import type { WriteProvider } from '../providers/write-provider';
+import { SandboxWriteProvider } from '../providers/sandbox-write-provider';
 import {
   BUS_PROVIDERS,
   FLIGHT_PROVIDERS,
@@ -21,6 +23,7 @@ import {
   POOL,
   PROVIDER_RATE_LIMITER,
   TRAIN_PROVIDERS,
+  WRITE_PROVIDER,
 } from './tokens';
 
 /**
@@ -85,7 +88,27 @@ import {
         });
       },
     },
+    {
+      // Phase 7: the Booking Agent's write-side provider. Explicitly the
+      // deterministic sandbox (CLAUDE.md §25) - no real/commercial
+      // booking API exists in this phase. A NestJS provider with a
+      // plain useFactory (no transient scope) is a singleton per module
+      // instance, so this one SandboxWriteProvider's in-memory
+      // idempotency-key cache correctly persists across HTTP requests,
+      // matching what a real provider's own idempotency store would do.
+      provide: WRITE_PROVIDER,
+      useFactory: (): WriteProvider => new SandboxWriteProvider(),
+    },
   ],
-  exports: [POOL, LLM_PROVIDER, HOTEL_PROVIDERS, FLIGHT_PROVIDERS, TRAIN_PROVIDERS, BUS_PROVIDERS, PROVIDER_RATE_LIMITER],
+  exports: [
+    POOL,
+    LLM_PROVIDER,
+    HOTEL_PROVIDERS,
+    FLIGHT_PROVIDERS,
+    TRAIN_PROVIDERS,
+    BUS_PROVIDERS,
+    PROVIDER_RATE_LIMITER,
+    WRITE_PROVIDER,
+  ],
 })
 export class CoreModule {}

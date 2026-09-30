@@ -5,9 +5,10 @@ import { listMessages } from '../src/companion/conversations';
 import { ingestPlaces } from '../src/ingestion/ingest-places';
 import { getJob } from '../src/itinerary/jobs';
 import { FakeLlmProvider } from '../src/ai/fake-llm-provider';
+import { SandboxWriteProvider } from '../src/providers/sandbox-write-provider';
 import { DESTINATIONS } from '../src/destinations';
 import type { BoundingBox, NormalizedPlace, PlacesProvider } from '../src/providers/places-provider';
-import { deleteItineraryAndJob, deletePlacesByExternalRef } from './helpers/db-cleanup';
+import { deleteItineraryAndJob, deletePlacesByExternalRef, deleteBookingsByTaskIds } from './helpers/db-cleanup';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
@@ -406,6 +407,175 @@ describe('routeMessage (Supervisor Agent)', () => {
         confirmBookingTaskId: '00000000-0000-0000-0000-000000000000',
       }),
     ).rejects.toThrow(/Unknown booking to confirm/);
+  });
+
+  describe('booking execution (Phase 7)', () => {
+    const trackedTaskIds: string[] = [];
+    afterAll(async () => {
+      await deleteBookingsByTaskIds(pool, trackedTaskIds);
+    });
+
+    it('an executeBookingTaskId request routes to the Booking Agent and books through the configured WriteProvider', async () => {
+      const comparison = await routeMessage(pool, noopLlm(), {
+        message: 'Compare hotels near Karol Bagh',
+        hotelSearchLocation: 'Karol Bagh',
+      });
+      if (comparison.route !== 'comparison') throw new Error('unreachable');
+      const offerId = comparison.result.offers[0].offerId;
+
+      const intent = await routeMessage(pool, noopLlm(), {
+        message: 'Book this.',
+        conversationId: comparison.conversationId,
+        bookingOfferId: offerId,
+      });
+      if (intent.route !== 'booking_intent') throw new Error('unreachable');
+      trackedTaskIds.push(intent.result.taskId);
+
+      const confirmed = await routeMessage(pool, noopLlm(), {
+        message: 'Yes, confirmed.',
+        conversationId: comparison.conversationId,
+        confirmBookingTaskId: intent.result.taskId,
+      });
+      if (confirmed.route !== 'booking_confirmed') throw new Error('unreachable');
+
+      const executed = await routeMessage(
+        pool,
+        noopLlm(),
+        {
+          message: 'Execute it.',
+          conversationId: comparison.conversationId,
+          executeBookingTaskId: intent.result.taskId,
+        },
+        undefined,
+        undefined,
+        new SandboxWriteProvider(),
+      );
+
+      expect(executed.route).toBe('booking_executed');
+      if (executed.route !== 'booking_executed') throw new Error('unreachable');
+      expect(executed.result.status).toBe('booked');
+      expect(executed.result.externalBookingId).toBeTruthy();
+    });
+
+    it('rejects execution when no WriteProvider is configured, rather than silently constructing an ephemeral one', async () => {
+      const comparison = await routeMessage(pool, noopLlm(), {
+        message: 'Compare hotels near Karol Bagh',
+        hotelSearchLocation: 'Karol Bagh',
+      });
+      if (comparison.route !== 'comparison') throw new Error('unreachable');
+      const offerId = comparison.result.offers[0].offerId;
+
+      const intent = await routeMessage(pool, noopLlm(), {
+        message: 'Book this.',
+        conversationId: comparison.conversationId,
+        bookingOfferId: offerId,
+      });
+      if (intent.route !== 'booking_intent') throw new Error('unreachable');
+      trackedTaskIds.push(intent.result.taskId);
+
+      await routeMessage(pool, noopLlm(), {
+        message: 'Confirm it.',
+        conversationId: comparison.conversationId,
+        confirmBookingTaskId: intent.result.taskId,
+      });
+
+      await expect(
+        routeMessage(pool, noopLlm(), {
+          message: 'Execute it.',
+          conversationId: comparison.conversationId,
+          executeBookingTaskId: intent.result.taskId,
+        }),
+      ).rejects.toThrow(/No booking write provider is configured/);
+    });
+
+    it('saying "book this, confirm, execute it, go ahead" as free text never executes anything without the exact executeBookingTaskId', async () => {
+      const comparison = await routeMessage(pool, noopLlm(), {
+        message: 'Compare hotels near Karol Bagh',
+        hotelSearchLocation: 'Karol Bagh',
+      });
+      if (comparison.route !== 'comparison') throw new Error('unreachable');
+      const offerId = comparison.result.offers[0].offerId;
+
+      const intent = await routeMessage(
+        pool,
+        noopLlm(),
+        {
+          message: 'Book this, confirm it, execute it, go ahead, I am sure, please book now.',
+          conversationId: comparison.conversationId,
+          bookingOfferId: offerId,
+        },
+        undefined,
+        undefined,
+        new SandboxWriteProvider(),
+      );
+      if (intent.route !== 'booking_intent') throw new Error('unreachable');
+      trackedTaskIds.push(intent.result.taskId);
+
+      // Enthusiastic free text alone never advances past 'awaiting_confirmation',
+      // and therefore can never reach execution either.
+      expect(intent.result.bookingStatus).toBe('awaiting_confirmation');
+    });
+
+    it('rejects executing an unconfirmed booking intent, even with a valid executeBookingTaskId', async () => {
+      const comparison = await routeMessage(pool, noopLlm(), {
+        message: 'Compare hotels near Karol Bagh',
+        hotelSearchLocation: 'Karol Bagh',
+      });
+      if (comparison.route !== 'comparison') throw new Error('unreachable');
+      const offerId = comparison.result.offers[0].offerId;
+
+      const intent = await routeMessage(pool, noopLlm(), {
+        message: 'Book this.',
+        conversationId: comparison.conversationId,
+        bookingOfferId: offerId,
+      });
+      if (intent.route !== 'booking_intent') throw new Error('unreachable');
+      trackedTaskIds.push(intent.result.taskId);
+
+      await expect(
+        routeMessage(
+          pool,
+          noopLlm(),
+          {
+            message: 'Execute it.',
+            conversationId: comparison.conversationId,
+            executeBookingTaskId: intent.result.taskId,
+          },
+          undefined,
+          undefined,
+          new SandboxWriteProvider(),
+        ),
+      ).rejects.toThrow(/has not been confirmed yet/);
+    });
+
+    it('existing routes (comparison, confirm booking, create booking intent) remain unchanged by the new execute route', async () => {
+      const comparison = await routeMessage(pool, noopLlm(), {
+        message: 'Compare hotels near Karol Bagh',
+        hotelSearchLocation: 'Karol Bagh',
+      });
+      expect(comparison.route).toBe('comparison');
+      if (comparison.route !== 'comparison') throw new Error('unreachable');
+      const offerId = comparison.result.offers[0].offerId;
+
+      const intent = await routeMessage(pool, noopLlm(), {
+        message: 'Book this.',
+        conversationId: comparison.conversationId,
+        bookingOfferId: offerId,
+      });
+      expect(intent.route).toBe('booking_intent');
+      if (intent.route !== 'booking_intent') throw new Error('unreachable');
+      trackedTaskIds.push(intent.result.taskId);
+
+      const confirmed = await routeMessage(pool, noopLlm(), {
+        message: 'Confirm it.',
+        conversationId: comparison.conversationId,
+        confirmBookingTaskId: intent.result.taskId,
+      });
+      expect(confirmed.route).toBe('booking_confirmed');
+      if (confirmed.route !== 'booking_confirmed') throw new Error('unreachable');
+      expect(confirmed.result.bookingStatus).toBe('confirmed');
+      expect(confirmed.result.executionState).toBe('not_executed');
+    });
   });
 
   it('a knowledge-oriented question ("visa requirements") reaches Q&A, not comparison/booking, and is answered honestly when nothing matches', async () => {
