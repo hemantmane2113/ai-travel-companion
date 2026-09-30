@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block body_class %}chat{% endblock %}
+{% block body %}
+<div class="layout">
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">Travel Companion</div>
+    <button type="button" class="new-chat" id="new-chat">New trip</button>
+    <nav aria-label="Conversations"><ul class="conversations" id="conversations"></ul></nav>
+    <div class="account">
+      <span class="account-email" title="{{ user.email }}">{{ user.email }}</span>
+      <form method="post" action="/logout"><button type="submit" class="link-button">Sign out</button></form>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <button type="button" class="menu-button" id="menu-button" aria-label="Show conversations" aria-expanded="false">☰</button>
+      <h1 id="chat-title">New trip</h1>
+    </header>
+
+    <div class="messages" id="messages" aria-live="polite">
+      <div class="empty" id="empty">
+        <h2>Where are you going?</h2>
+        <p>Ask a question about a place, or tell me your destination and dates and I will plan the trip with you.</p>
+        <div class="suggestions">
+          <button type="button" class="suggestion">I am visiting Delhi from 12 Sept to 15 Sept. Plan a trip for me.</button>
+          <button type="button" class="suggestion">What is the story behind the Red Fort, and is it worth a visit?</button>
+          <button type="button" class="suggestion">Compare hotels near Karol Bagh in Delhi.</button>
+        </div>
+      </div>
+    </div>
+
+    <form class="composer" id="composer">
+      <label class="visually-hidden" for="input">Message</label>
+      <textarea id="input" rows="1" maxlength="4000" placeholder="Ask about a place or describe your trip" required></textarea>
+      <button type="submit" id="send">Send</button>
+    </form>
+  </main>
+</div>
+<script src="{{ url_for('static', path='chat.js') }}" type="module"></script>
+{% endblock %}
