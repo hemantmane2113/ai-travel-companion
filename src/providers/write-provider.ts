@@ -31,6 +31,15 @@ export interface BookingConfirmation {
   providerBookingRef: string | null;
 }
 
+/** The write side's cancellation outcome (V2 architecture Phase 8/§5.8) - deliberately its own type, not a reuse of BookingExecutionState/BookingConfirmation, since a cancellation confirmation is a distinct provider operation with its own reference (`cancellationRef`, not a booking ref). */
+export type CancellationExecutionState = 'not_executed' | 'unknown' | 'confirmed';
+
+export interface CancellationConfirmation {
+  executionState: CancellationExecutionState;
+  /** The provider's own cancellation confirmation reference, if it issues one - distinct from a booking's own providerBookingRef. */
+  cancellationRef: string | null;
+}
+
 export interface WriteProvider {
   readonly providerName: string;
   /** Re-verifies price/availability with the provider and returns a fresh, bookable snapshot (plan §I: "show final price/details, re-verify against provider"). */
@@ -39,4 +48,15 @@ export interface WriteProvider {
   execute(prepared: PreparedBooking, idempotencyKey: string): Promise<BookingConfirmation>;
   /** Resolves an ambiguous/timed-out execute before any retry - never blindly retry a write (plan §I). */
   getStatus(idempotencyKey: string): Promise<BookingConfirmation>;
+  /**
+   * Cancels an existing provider booking, identified by its own
+   * `providerBookingRef` (V2 architecture Phase 8/§5.8). Accepts its own
+   * caller-supplied idempotency key - distinct from the original
+   * booking's key, since cancellation is a separate operation with its
+   * own retry-safety requirement (plan §I's idempotency discipline
+   * applies symmetrically to every write, not just booking creation).
+   */
+  cancel(providerBookingRef: string, idempotencyKey: string): Promise<CancellationConfirmation>;
+  /** Resolves an ambiguous/timed-out cancel before any retry - the cancellation-side mirror of getStatus. */
+  getCancellationStatus(idempotencyKey: string): Promise<CancellationConfirmation>;
 }

@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto';
-import type { BookingConfirmation, PreparedBooking, WriteProvider } from './write-provider';
+import type { BookingConfirmation, CancellationConfirmation, PreparedBooking, WriteProvider } from './write-provider';
 
 export interface SandboxWriteProviderOptions {
   /**
@@ -10,6 +10,8 @@ export interface SandboxWriteProviderOptions {
    * actual bookability.
    */
   failOfferIds?: Iterable<string>;
+  /** providerBookingRefs that must deterministically fail cancellation - the same test-only hook as failOfferIds, applied to Phase 8's cancel(). */
+  failCancellationForRefs?: Iterable<string>;
 }
 
 /**
@@ -33,10 +35,13 @@ export class SandboxWriteProvider implements WriteProvider {
   readonly providerName = 'SandboxWriteProvider';
 
   private readonly failOfferIds: Set<string>;
+  private readonly failCancellationForRefs: Set<string>;
   private readonly confirmationsByIdempotencyKey = new Map<string, BookingConfirmation>();
+  private readonly cancellationsByIdempotencyKey = new Map<string, CancellationConfirmation>();
 
   constructor(options: SandboxWriteProviderOptions = {}) {
     this.failOfferIds = new Set(options.failOfferIds ?? []);
+    this.failCancellationForRefs = new Set(options.failCancellationForRefs ?? []);
   }
 
   async prepare(_offerId: string): Promise<PreparedBooking> {
@@ -74,5 +79,29 @@ export class SandboxWriteProvider implements WriteProvider {
     const existing = this.confirmationsByIdempotencyKey.get(idempotencyKey);
     if (existing) return existing;
     return { executionState: 'not_executed', providerBookingRef: null };
+  }
+
+  async cancel(providerBookingRef: string, idempotencyKey: string): Promise<CancellationConfirmation> {
+    const existing = this.cancellationsByIdempotencyKey.get(idempotencyKey);
+    if (existing) {
+      return existing;
+    }
+
+    if (this.failCancellationForRefs.has(providerBookingRef)) {
+      throw new Error(`SandboxWriteProvider: simulated cancellation failure for booking ${providerBookingRef}`);
+    }
+
+    const confirmation: CancellationConfirmation = {
+      executionState: 'confirmed',
+      cancellationRef: `sandbox-cancellation-${randomUUID()}`,
+    };
+    this.cancellationsByIdempotencyKey.set(idempotencyKey, confirmation);
+    return confirmation;
+  }
+
+  async getCancellationStatus(idempotencyKey: string): Promise<CancellationConfirmation> {
+    const existing = this.cancellationsByIdempotencyKey.get(idempotencyKey);
+    if (existing) return existing;
+    return { executionState: 'not_executed', cancellationRef: null };
   }
 }

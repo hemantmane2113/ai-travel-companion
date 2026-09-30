@@ -2,7 +2,7 @@ import type { Pool } from 'pg';
 import type { Domain } from '../providers/hotel-provider';
 import type { SelectedOfferSnapshot } from './booking-intent';
 
-export type BookingRecordStatus = 'executing' | 'booked' | 'failed';
+export type BookingRecordStatus = 'executing' | 'booked' | 'failed' | 'cancelling' | 'cancelled';
 
 export interface BookingRow {
   id: string;
@@ -22,7 +22,11 @@ export type BookingEventType =
   | 'execution_requested'
   | 'execution_started'
   | 'booking_succeeded'
-  | 'booking_failed';
+  | 'booking_failed'
+  | 'cancellation_requested'
+  | 'cancellation_started'
+  | 'cancellation_succeeded'
+  | 'cancellation_failed';
 
 export interface BookingEventRow {
   id: string;
@@ -124,6 +128,24 @@ export async function getBookingByTaskId(pool: Pool, taskId: string): Promise<Bo
 }
 
 /**
+ * The booking-identification mechanism Phase 8's Cancellation Agent uses
+ * (V2 architecture Phase 8/§5): a booking is looked up by its own stable
+ * id - never by hotel name, provider name, or free text. This also
+ * doubles as "getBookingStatus" (plan §18) - the returned row's own
+ * `status` field IS the persisted, provider-confirmed state; nothing
+ * reconstructs it from the LLM or conversation text.
+ */
+export async function getBookingById(pool: Pool, id: string): Promise<BookingRow | null> {
+  const result = await pool.query(
+    `select id, task_id, conversation_id, provider, domain, idempotency_key, external_booking_id, status, offer_snapshot, created_at, updated_at
+     from bookings where id = $1`,
+    [id],
+  );
+  if (result.rows.length === 0) return null;
+  return toBookingRow(result.rows[0]);
+}
+
+/**
  * Guarded by `where status = 'executing'` so a booking already finalized
  * by another (or a prior) call is never clobbered - a lost race here
  * means someone else already resolved this booking, so the caller
@@ -145,6 +167,55 @@ export async function markBookingFailed(pool: Pool, bookingId: string): Promise<
   const result = await pool.query(
     `update bookings set status = 'failed', updated_at = now()
      where id = $1 and status = 'executing'
+     returning id, task_id, conversation_id, provider, domain, idempotency_key, external_booking_id, status, offer_snapshot, created_at, updated_at`,
+    [bookingId],
+  );
+  if (result.rows.length === 0) return null;
+  return toBookingRow(result.rows[0]);
+}
+
+/**
+ * The DB-level concurrency guard for cancellation (V2 architecture Phase
+ * 8/§9, "our-side" idempotency - the same discipline Phase 7 established
+ * for execution, adapted from an INSERT-based claim to an UPDATE-based
+ * one since the target row already exists). Only a booking currently
+ * 'booked' can be claimed; a second concurrent/retried caller finds zero
+ * rows updated and must never call the provider itself.
+ */
+export async function claimBookingForCancellation(pool: Pool, bookingId: string): Promise<BookingRow | null> {
+  const result = await pool.query(
+    `update bookings set status = 'cancelling', updated_at = now()
+     where id = $1 and status = 'booked'
+     returning id, task_id, conversation_id, provider, domain, idempotency_key, external_booking_id, status, offer_snapshot, created_at, updated_at`,
+    [bookingId],
+  );
+  if (result.rows.length === 0) return null;
+  return toBookingRow(result.rows[0]);
+}
+
+export async function markBookingCancelled(pool: Pool, bookingId: string): Promise<BookingRow | null> {
+  const result = await pool.query(
+    `update bookings set status = 'cancelled', updated_at = now()
+     where id = $1 and status = 'cancelling'
+     returning id, task_id, conversation_id, provider, domain, idempotency_key, external_booking_id, status, offer_snapshot, created_at, updated_at`,
+    [bookingId],
+  );
+  if (result.rows.length === 0) return null;
+  return toBookingRow(result.rows[0]);
+}
+
+/**
+ * A failed cancellation reverts to 'booked', never to 'failed' (that
+ * status means "execution never produced a real booking" - this
+ * booking IS real and remains so; only the cancellation attempt did not
+ * succeed). This is the hard requirement that a provider timeout/failure
+ * must never become `cancelled`, and must never leave the booking in a
+ * state other than the externally accurate one.
+ */
+export async function revertBookingToBooked(pool: Pool, bookingId: string): Promise<BookingRow | null> {
+  const result = await pool.query(
+    `update bookings set status = 'booked', updated_at = now()
+     where id = $1 and status = 'cancelling'
      returning id, task_id, conversation_id, provider, domain, idempotency_key, external_booking_id, status, offer_snapshot, created_at, updated_at`,
     [bookingId],
   );

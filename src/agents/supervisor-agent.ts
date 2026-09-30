@@ -12,6 +12,7 @@ import { getLatestTaskForConversation } from '../tasks/tasks';
 import { getCancellationPolicy, type CancellationPolicyResult } from '../tasks/get-cancellation-policy';
 import { createBookingIntent, confirmBookingIntent, type BookingIntentResult } from '../booking/booking-intent';
 import { executeBookingIntent } from './booking-agent';
+import { createCancellationIntent, confirmCancellationIntent, executeCancellationIntent, type CancellationIntentResult } from './cancellation-agent';
 import type { BookingRow } from '../booking/bookings';
 
 export interface CompanionInput {
@@ -45,6 +46,10 @@ export interface CompanionInput {
   confirmBookingTaskId?: string;
   /** Structured booking-execution trigger (Phase 7) - the EXACT taskId of an already-CONFIRMED booking intent. Dispatches to the Booking Agent (src/agents/booking-agent.ts), which re-verifies confirmation itself regardless of this route being reached. Never inferred from free text. */
   executeBookingTaskId?: string;
+  /** Structured cancellation-request trigger (Phase 8) - the EXACT id of an existing `bookings` row to cancel. Never inferred from hotel/provider name or free text. */
+  cancelBookingId?: string;
+  /** Structured cancellation-confirmation trigger (Phase 8) - the EXACT taskId a prior cancellation-request response returned. Confirms AND executes the cancellation in one route (src/agents/cancellation-agent.ts) - never inferred from "cancel it"/"yes"/"go ahead". */
+  confirmCancellationTaskId?: string;
 }
 
 export type CompanionResult =
@@ -55,6 +60,8 @@ export type CompanionResult =
   | { route: 'booking_intent'; conversationId: string; result: BookingIntentResult }
   | { route: 'booking_confirmed'; conversationId: string; result: BookingIntentResult }
   | { route: 'booking_executed'; conversationId: string; result: BookingRow }
+  | { route: 'cancellation_intent'; conversationId: string; result: CancellationIntentResult }
+  | { route: 'cancellation_executed'; conversationId: string; result: BookingRow }
   | {
       route: 'ordinal_selection';
       conversationId: string;
@@ -128,10 +135,18 @@ async function resolveOrdinalSelection(
  * identifier (`confirmBookingTaskId`) rather than any free-text signal -
  * this is the explicit confirmation boundary itself, not a convenience.
  *
- * Route priority: full trip > comparison > cancellation policy > confirm
- * booking > execute booking > create booking intent > ordinal follow-up >
- * Q&A. All but Q&A are structured/pattern signals checked in that fixed
- * order; Q&A is the default when none matches.
+ * Route priority: full trip > comparison > cancellation policy (offer
+ * lookup) > confirm booking > execute booking > confirm+execute
+ * cancellation > create cancellation intent > create booking intent >
+ * ordinal follow-up > Q&A. All but Q&A are structured/pattern signals
+ * checked in that fixed order; Q&A is the default when none matches.
+ *
+ * Note the two distinctly-named, unrelated "cancellation" routes:
+ * `cancellationPolicyOfferId` (Phase 5/6) looks up a policy for a
+ * COMPARISON offer, before any booking exists; `cancelBookingId`/
+ * `confirmCancellationTaskId` (Phase 8) cancel an existing, already-
+ * executed `bookings` row. They operate on different objects and never
+ * overlap.
  */
 export async function routeMessage(
   pool: Pool,
@@ -239,6 +254,40 @@ export async function routeMessage(
       status: result.status,
     });
     return { route: 'booking_executed', conversationId, result };
+  }
+
+  if (input.confirmCancellationTaskId) {
+    if (!writeProvider) {
+      throw new Error('No booking write provider is configured - cannot execute a cancellation.');
+    }
+    await confirmCancellationIntent(pool, conversationId, input.confirmCancellationTaskId);
+    const result = await executeCancellationIntent(pool, writeProvider, conversationId, input.confirmCancellationTaskId);
+    const text =
+      result.status === 'cancelled'
+        ? `Your ${result.provider} booking has been cancelled.`
+        : `I wasn't able to complete this cancellation with ${result.provider} - your booking remains active.`;
+    await appendMessage(pool, conversationId, 'assistant', text, {
+      route: 'cancellation_executed',
+      bookingId: result.id,
+      status: result.status,
+    });
+    return { route: 'cancellation_executed', conversationId, result };
+  }
+
+  if (input.cancelBookingId) {
+    const result = await createCancellationIntent(pool, conversationId, input.cancelBookingId);
+    const consequenceText =
+      result.consequences.refundStatus === 'unavailable'
+        ? "I don't have enough information to calculate a refund amount, but here is the cancellation policy."
+        : '';
+    await appendMessage(
+      pool,
+      conversationId,
+      'assistant',
+      `Cancellation policy (via ${result.provider}): ${result.policy.policy ?? 'unavailable'}. ${consequenceText} Reply with confirmCancellationTaskId "${result.taskId}" to confirm.`,
+      { route: 'cancellation_intent', taskId: result.taskId },
+    );
+    return { route: 'cancellation_intent', conversationId, result };
   }
 
   if (input.bookingOfferId) {

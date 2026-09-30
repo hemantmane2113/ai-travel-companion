@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import { Pool } from 'pg';
 import { routeMessage } from '../src/agents/supervisor-agent';
-import { listMessages } from '../src/companion/conversations';
+import { listMessages, createConversation } from '../src/companion/conversations';
 import { ingestPlaces } from '../src/ingestion/ingest-places';
 import { getJob } from '../src/itinerary/jobs';
 import { FakeLlmProvider } from '../src/ai/fake-llm-provider';
@@ -575,6 +575,135 @@ describe('routeMessage (Supervisor Agent)', () => {
       if (confirmed.route !== 'booking_confirmed') throw new Error('unreachable');
       expect(confirmed.result.bookingStatus).toBe('confirmed');
       expect(confirmed.result.executionState).toBe('not_executed');
+    });
+  });
+
+  describe('cancellation (Phase 8)', () => {
+    const trackedTaskIds: string[] = [];
+    afterAll(async () => {
+      await deleteBookingsByTaskIds(pool, trackedTaskIds);
+    });
+
+    async function bookAHotel(conversationId: string) {
+      const comparison = await routeMessage(pool, noopLlm(), {
+        message: 'Compare hotels near Karol Bagh',
+        hotelSearchLocation: 'Karol Bagh',
+      });
+      if (comparison.route !== 'comparison') throw new Error('unreachable');
+      const offerId = comparison.result.offers[0].offerId;
+
+      const intent = await routeMessage(pool, noopLlm(), {
+        message: 'Book this.',
+        conversationId: comparison.conversationId,
+        bookingOfferId: offerId,
+      });
+      if (intent.route !== 'booking_intent') throw new Error('unreachable');
+      trackedTaskIds.push(intent.result.taskId);
+
+      await routeMessage(pool, noopLlm(), {
+        message: 'Confirm it.',
+        conversationId: comparison.conversationId,
+        confirmBookingTaskId: intent.result.taskId,
+      });
+
+      const executed = await routeMessage(
+        pool,
+        noopLlm(),
+        { message: 'Execute it.', conversationId: comparison.conversationId, executeBookingTaskId: intent.result.taskId },
+        undefined,
+        undefined,
+        new SandboxWriteProvider(),
+      );
+      if (executed.route !== 'booking_executed') throw new Error('unreachable');
+      return { conversationId: comparison.conversationId, booking: executed.result };
+    }
+
+    it('a cancelBookingId request routes to the Cancellation Agent and returns a cancellation intent', async () => {
+      const { conversationId, booking } = await bookAHotel(await createConversation(pool));
+
+      const result = await routeMessage(pool, noopLlm(), {
+        message: 'Cancel my booking.',
+        conversationId,
+        cancelBookingId: booking.id,
+      });
+
+      expect(result.route).toBe('cancellation_intent');
+      if (result.route !== 'cancellation_intent') throw new Error('unreachable');
+      expect(result.result.bookingId).toBe(booking.id);
+      expect(result.result.cancellationStatus).toBe('awaiting_confirmation');
+    });
+
+    it('a confirmCancellationTaskId request confirms and executes the cancellation in one route', async () => {
+      const { conversationId, booking } = await bookAHotel(await createConversation(pool));
+
+      const intent = await routeMessage(pool, noopLlm(), {
+        message: 'Cancel my booking.',
+        conversationId,
+        cancelBookingId: booking.id,
+      });
+      if (intent.route !== 'cancellation_intent') throw new Error('unreachable');
+
+      const result = await routeMessage(
+        pool,
+        noopLlm(),
+        { message: 'Yes, confirmed.', conversationId, confirmCancellationTaskId: intent.result.taskId },
+        undefined,
+        undefined,
+        new SandboxWriteProvider(),
+      );
+
+      expect(result.route).toBe('cancellation_executed');
+      if (result.route !== 'cancellation_executed') throw new Error('unreachable');
+      expect(result.result.status).toBe('cancelled');
+      expect(result.result.id).toBe(booking.id);
+    });
+
+    it('saying "cancel it, yes, go ahead, please cancel, I am sure, do it" as free text never cancels anything without the exact confirmCancellationTaskId', async () => {
+      const { conversationId, booking } = await bookAHotel(await createConversation(pool));
+
+      const intent = await routeMessage(pool, noopLlm(), {
+        message: 'Cancel it, yes, go ahead, please cancel, I am sure, do it.',
+        conversationId,
+        cancelBookingId: booking.id,
+      });
+      if (intent.route !== 'cancellation_intent') throw new Error('unreachable');
+
+      expect(intent.result.cancellationStatus).toBe('awaiting_confirmation');
+
+      const stillBooked = await routeMessage(pool, noopLlm(), {
+        message: 'Cancel it, yes, go ahead, please cancel, I am sure, do it.',
+        conversationId,
+      });
+      // No structured field at all -> falls through to Q&A, never cancels.
+      expect(stillBooked.route).toBe('qa');
+    });
+
+    it('existing booking-execution routes remain unchanged by the new cancellation routes', async () => {
+      const conversationId = await createConversation(pool);
+      const comparison = await routeMessage(pool, noopLlm(), {
+        message: 'Compare hotels near Karol Bagh',
+        hotelSearchLocation: 'Karol Bagh',
+        conversationId,
+      });
+      expect(comparison.route).toBe('comparison');
+      if (comparison.route !== 'comparison') throw new Error('unreachable');
+      const offerId = comparison.result.offers[0].offerId;
+
+      const intent = await routeMessage(pool, noopLlm(), {
+        message: 'Book this.',
+        conversationId: comparison.conversationId,
+        bookingOfferId: offerId,
+      });
+      expect(intent.route).toBe('booking_intent');
+      if (intent.route !== 'booking_intent') throw new Error('unreachable');
+      trackedTaskIds.push(intent.result.taskId);
+
+      const confirmed = await routeMessage(pool, noopLlm(), {
+        message: 'Confirm it.',
+        conversationId: comparison.conversationId,
+        confirmBookingTaskId: intent.result.taskId,
+      });
+      expect(confirmed.route).toBe('booking_confirmed');
     });
   });
 

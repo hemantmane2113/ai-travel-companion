@@ -8,7 +8,7 @@ import { runComparison } from '../src/agents/comparison-agent';
 import { createConversation } from '../src/companion/conversations';
 import { FakeLlmProvider } from '../src/ai/fake-llm-provider';
 import { SandboxWriteProvider } from '../src/providers/sandbox-write-provider';
-import type { PreparedBooking, WriteProvider, BookingConfirmation } from '../src/providers/write-provider';
+import type { PreparedBooking, WriteProvider, BookingConfirmation, CancellationConfirmation } from '../src/providers/write-provider';
 import { deleteBookingsByTaskIds } from './helpers/db-cleanup';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
@@ -38,6 +38,12 @@ class CountingWriteProvider implements WriteProvider {
   async getStatus(idempotencyKey: string): Promise<BookingConfirmation> {
     this.getStatusCalls += 1;
     return this.inner.getStatus(idempotencyKey);
+  }
+  async cancel(providerBookingRef: string, idempotencyKey: string): Promise<CancellationConfirmation> {
+    return this.inner.cancel(providerBookingRef, idempotencyKey);
+  }
+  async getCancellationStatus(idempotencyKey: string): Promise<CancellationConfirmation> {
+    return this.inner.getCancellationStatus(idempotencyKey);
   }
 }
 

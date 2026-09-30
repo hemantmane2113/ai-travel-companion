@@ -1,6 +1,6 @@
 import type { Pool } from 'pg';
 
-export type TaskType = 'comparison' | 'booking';
+export type TaskType = 'comparison' | 'booking' | 'cancellation';
 export type TaskStatus = 'pending' | 'processing' | 'complete' | 'failed';
 
 export interface TaskRow {

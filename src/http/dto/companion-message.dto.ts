@@ -119,4 +119,25 @@ export class CompanionMessageDto {
   @IsOptional()
   @IsUUID()
   executeBookingTaskId?: string;
+
+  // Structured cancellation-request trigger (Phase 8) - the EXACT id of
+  // an existing `bookings` row to cancel (src/agents/cancellation-agent.ts).
+  // Never inferred from hotel/provider name or free text like "cancel
+  // it" - the booking must be identified by its own stable id.
+  @IsOptional()
+  @IsUUID()
+  cancelBookingId?: string;
+
+  // Structured cancellation-confirmation trigger (Phase 8) - the EXACT
+  // taskId a prior cancellation-request response returned. This is the
+  // explicit confirmation mechanism itself, mirroring
+  // confirmBookingTaskId - never satisfied by "yes", "confirm", "go
+  // ahead", or any other free text. Confirming also executes the
+  // cancellation in the same request (see supervisor-agent.ts) - the
+  // architecture's own cancellation flow goes directly from explicit
+  // confirmation to the Cancellation Agent/WriteProvider, unlike
+  // booking's separate confirm/execute steps.
+  @IsOptional()
+  @IsUUID()
+  confirmCancellationTaskId?: string;
 }
