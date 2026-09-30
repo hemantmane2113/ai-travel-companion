@@ -12,6 +12,7 @@
     "ingest:places": "tsx src/ingestion/cli.ts",
     "seed:warnings": "tsx src/advisory/cli.ts",
     "seed:knowledge": "tsx src/knowledge/cli.ts",
+    "reconcile:jobs": "tsx src/jobs/reconciliation-cli.ts",
     "start:api": "tsx src/main.ts",
     "start:api:dev": "tsx watch src/main.ts",
     "test": "vitest run",
