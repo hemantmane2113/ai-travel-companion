@@ -153,4 +153,90 @@ describe('routeMessage (Supervisor Agent)', () => {
       }),
     ).rejects.toThrow(/Unknown conversation/);
   });
+
+  it('routes a hotel-comparison request (hotelSearchLocation supplied) to the Comparison Agent', async () => {
+    const result = await routeMessage(pool, noopLlm(), {
+      message: 'Compare hotels near Karol Bagh',
+      hotelSearchLocation: 'Karol Bagh',
+    });
+
+    expect(result.route).toBe('comparison');
+    if (result.route !== 'comparison') throw new Error('unreachable');
+    expect(result.taskId).toBeTruthy();
+    expect(result.result.offers.length).toBeGreaterThan(0);
+    expect(result.result.domains).toEqual(['hotel']);
+
+    const messages = await listMessages(pool, result.conversationId);
+    expect(messages).toHaveLength(2);
+    expect(messages[1].structuredPayload).toMatchObject({ route: 'comparison', taskId: result.taskId });
+  });
+
+  it('a hotel-comparison message with no hotelSearchLocation does NOT route to the Comparison Agent (falls through to Q&A)', async () => {
+    const result = await routeMessage(pool, noopLlm(), {
+      message: 'Compare hotels near Karol Bagh',
+    });
+
+    expect(result.route).toBe('qa');
+  });
+
+  it('an ordinal follow-up ("I like the second one") resolves against the persisted comparison task - not a fresh search', async () => {
+    const comparison = await routeMessage(pool, noopLlm(), {
+      message: 'Compare hotels near Karol Bagh',
+      hotelSearchLocation: 'Karol Bagh',
+    });
+    if (comparison.route !== 'comparison') throw new Error('unreachable');
+    const secondPersistedOffer = comparison.result.offers[1];
+
+    const followUp = await routeMessage(pool, noopLlm(), {
+      message: 'I like the second one.',
+      conversationId: comparison.conversationId,
+    });
+
+    expect(followUp.route).toBe('ordinal_selection');
+    if (followUp.route !== 'ordinal_selection') throw new Error('unreachable');
+    expect(followUp.selectedOfferId).toBe(secondPersistedOffer.offerId);
+    expect(followUp.provider).toBe(secondPersistedOffer.provider);
+    expect(followUp.domain).toBe('hotel');
+  });
+
+  it('an ambiguous ordinal reference (naming more than one position) is never guessed', async () => {
+    const comparison = await routeMessage(pool, noopLlm(), {
+      message: 'Compare hotels near Karol Bagh',
+      hotelSearchLocation: 'Karol Bagh',
+    });
+    if (comparison.route !== 'comparison') throw new Error('unreachable');
+
+    await expect(
+      routeMessage(pool, noopLlm(), {
+        message: 'I like the first and second one.',
+        conversationId: comparison.conversationId,
+      }),
+    ).rejects.toThrow(/not sure which option you mean/);
+  });
+
+  it('an ordinal follow-up with no prior completed comparison task in the conversation is never guessed', async () => {
+    await expect(
+      routeMessage(pool, noopLlm(), { message: 'I like the second one.' }),
+    ).rejects.toThrow(/don't have a completed hotel comparison/);
+  });
+
+  it('an ordinal follow-up outside the persisted result set is never guessed', async () => {
+    // Force zero offers by overriding the injected hotel providers, so
+    // "the first one" has nothing to resolve against.
+    const comparison = await routeMessage(
+      pool,
+      noopLlm(),
+      { message: 'Compare hotels near Karol Bagh', hotelSearchLocation: 'Karol Bagh' },
+      [],
+    );
+    if (comparison.route !== 'comparison') throw new Error('unreachable');
+    expect(comparison.result.offers).toEqual([]);
+
+    await expect(
+      routeMessage(pool, noopLlm(), {
+        message: 'I like the first one.',
+        conversationId: comparison.conversationId,
+      }),
+    ).rejects.toThrow(/no option #1/);
+  });
 });

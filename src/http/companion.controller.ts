@@ -1,7 +1,8 @@
 import { BadRequestException, Body, Controller, HttpCode, Inject, Post } from '@nestjs/common';
 import type { Pool } from 'pg';
 import type { LlmProvider } from '../ai/llm-provider';
-import { LLM_PROVIDER, POOL } from './tokens';
+import type { HotelProvider } from '../providers/hotel-provider';
+import { HOTEL_PROVIDERS, LLM_PROVIDER, POOL } from './tokens';
 import { CompanionMessageDto } from './dto/companion-message.dto';
 import { validateDto } from './validate-dto';
 import { routeMessage, type CompanionResult } from '../agents/supervisor-agent';
@@ -19,6 +20,7 @@ export class CompanionController {
   constructor(
     @Inject(POOL) private readonly pool: Pool,
     @Inject(LLM_PROVIDER) private readonly llmProvider: LlmProvider,
+    @Inject(HOTEL_PROVIDERS) private readonly hotelProviders: HotelProvider[],
   ) {}
 
   @Post('messages')
@@ -26,7 +28,7 @@ export class CompanionController {
   async postMessage(@Body() body: unknown): Promise<CompanionResult> {
     const dto = await validateDto(CompanionMessageDto, body);
     try {
-      return await routeMessage(this.pool, this.llmProvider, dto);
+      return await routeMessage(this.pool, this.llmProvider, dto, this.hotelProviders);
     } catch (err) {
       throw new BadRequestException(err instanceof Error ? err.message : 'Invalid request');
     }

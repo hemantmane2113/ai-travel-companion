@@ -135,7 +135,7 @@ const ITINERARY_GENERATION_CONFIG: StructuredGenerationConfig<GeneratedItinerary
   isWellFormedOutput: isWellFormedItinerary,
   isWellFormedItem,
   extractItems: (parsed) => parsed.days.flatMap((day) => day.items),
-  getFactReferences: (item) => item.factReferences,
+  getReferencedIds: (item) => item.factReferences,
 };
 
 /**

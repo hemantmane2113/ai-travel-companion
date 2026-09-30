@@ -3,7 +3,9 @@ import { Pool } from 'pg';
 import { OpenAiCompatibleAdapter } from '../ai/openai-compatible-adapter';
 import { loadLlmConfigFromEnv } from '../ai/config';
 import type { LlmProvider } from '../ai/llm-provider';
-import { LLM_PROVIDER, POOL } from './tokens';
+import type { HotelProvider } from '../providers/hotel-provider';
+import { MockHotelProvider } from '../providers/mock-hotel-provider';
+import { HOTEL_PROVIDERS, LLM_PROVIDER, POOL } from './tokens';
 
 /**
  * Wires the plain, framework-free modules (Pool, AI Orchestration's
@@ -23,7 +25,15 @@ import { LLM_PROVIDER, POOL } from './tokens';
       provide: LLM_PROVIDER,
       useFactory: (): LlmProvider => new OpenAiCompatibleAdapter(loadLlmConfigFromEnv()),
     },
+    {
+      // Phase 4: the only registered HotelProvider is the deterministic
+      // mock (CLAUDE.md §25 - explicitly not a real/sandbox integration
+      // yet). Swapping or adding a real provider later is a config
+      // change here, same as LLM_PROVIDER above.
+      provide: HOTEL_PROVIDERS,
+      useFactory: (): HotelProvider[] => [new MockHotelProvider()],
+    },
   ],
-  exports: [POOL, LLM_PROVIDER],
+  exports: [POOL, LLM_PROVIDER, HOTEL_PROVIDERS],
 })
 export class CoreModule {}

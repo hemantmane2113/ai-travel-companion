@@ -19,8 +19,14 @@ export interface StructuredGenerationConfig<TParsed, TItem> {
   isWellFormedItem(value: unknown): value is TItem;
   /** Flattens whatever nested structure the domain uses (e.g. days -> items) into one list to grounding-check. */
   extractItems(parsed: TParsed): unknown[];
-  /** The fact_version id(s) a well-formed item claims to be grounded in. */
-  getFactReferences(item: TItem): string[];
+  /**
+   * The id(s) a well-formed item claims to be grounded in - fact_version
+   * ids for itinerary generation, offer ids for comparison narration
+   * (V2 architecture Phase 4), or whatever id space a future caller's
+   * domain uses. This primitive only ever checks membership; it has no
+   * idea what kind of id it's checking.
+   */
+  getReferencedIds(item: TItem): string[];
 }
 
 export interface StructuredGenerationResult<TParsed, TItem> {
@@ -28,7 +34,7 @@ export interface StructuredGenerationResult<TParsed, TItem> {
   parsed: TParsed;
   /**
    * Well-formed items whose every cited fact_version id was actually
-   * supplied in `allowedFactVersionIds`. Membership only - a caller with
+   * supplied in `allowedIds`. Membership only - a caller with
    * additional domain-specific grounding rules (e.g. "must cite its own
    * fact, not just any supplied one") applies those on top of this set.
    */
@@ -50,7 +56,7 @@ export async function generateValidatedStructuredOutput<TParsed, TItem>(
   provider: LlmProvider,
   systemPrompt: string,
   userPrompt: string,
-  allowedFactVersionIds: Set<string>,
+  allowedIds: Set<string>,
   config: StructuredGenerationConfig<TParsed, TItem>,
 ): Promise<StructuredGenerationResult<TParsed, TItem>> {
   const { text } = await provider.generate(systemPrompt, userPrompt);
@@ -77,8 +83,8 @@ export async function generateValidatedStructuredOutput<TParsed, TItem>(
       continue;
     }
 
-    const factsExist = config.getFactReferences(rawItem).every((id) => allowedFactVersionIds.has(id));
-    if (factsExist) {
+    const referencesExist = config.getReferencedIds(rawItem).every((id) => allowedIds.has(id));
+    if (referencesExist) {
       groundedItems.add(rawItem);
     } else {
       rejectedItems.push(rawItem);

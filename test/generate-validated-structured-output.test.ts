@@ -32,7 +32,7 @@ const CONFIG: StructuredGenerationConfig<TestOutput, TestItem> = {
   isWellFormedOutput,
   isWellFormedItem,
   extractItems: (parsed) => parsed.items,
-  getFactReferences: (item) => item.factReferences,
+  getReferencedIds: (item) => item.factReferences,
 };
 
 describe('generateValidatedStructuredOutput', () => {

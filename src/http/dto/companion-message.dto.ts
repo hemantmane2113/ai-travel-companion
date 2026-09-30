@@ -45,4 +45,13 @@ export class CompanionMessageDto {
   @IsString({ each: true })
   @ArrayMaxSize(10)
   mustVisit?: string[];
+
+  // Structured hotel-comparison trigger (Phase 4) - presence alone
+  // routes to the Comparison Agent (src/agents/supervisor-agent.ts).
+  // Deliberately flat, like every other structured field here - no
+  // nested-object DTO validation is introduced for this.
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  hotelSearchLocation?: string;
 }
