@@ -7,3 +7,9 @@ __pycache__/
 *.log
 *.db
 .DS_Store
+
+# Local-only test accounts for checking the app in a browser
+*.local.txt
+
+# Local assistant settings
+.claude/

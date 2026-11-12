@@ -1,25 +1,20 @@
-{% extends "base.html" %}
+{% extends "auth_base.html" %}
 {% block title %}Create account · Travel Companion{% endblock %}
-{% block body_class %}auth{% endblock %}
-{% block body %}
-<main class="auth-card">
-  <h1>Create your account</h1>
-  <p class="auth-sub">Your trips and bookings are saved to it.</p>
+{% block auth_heading %}
+<h1>Start planning</h1>
+<p class="auth-sub">Create an account to save your trips and bookings.</p>
+{% endblock %}
+{% block auth_form %}
+<form method="post" action="/register" class="auth-form">
+  <label for="email">Email</label>
+  <input id="email" name="email" type="email" autocomplete="email" value="{{ email or '' }}" required{% if not sign_in_buttons %} autofocus{% endif %}>
 
-  {% if error %}<p class="auth-error" role="alert">{{ error }}</p>{% endif %}
+  <label for="password">Password</label>
+  <input id="password" name="password" type="password" autocomplete="new-password"
+         minlength="{{ min_password_length }}" aria-describedby="password-hint" required>
+  <p class="hint" id="password-hint">At least {{ min_password_length }} characters.</p>
 
-  <form method="post" action="/register">
-    <label for="email">Email</label>
-    <input id="email" name="email" type="email" autocomplete="email" value="{{ email or '' }}" required autofocus>
-
-    <label for="password">Password</label>
-    <input id="password" name="password" type="password" autocomplete="new-password"
-           minlength="{{ min_password_length }}" aria-describedby="password-hint" required>
-    <p class="hint" id="password-hint">At least {{ min_password_length }} characters.</p>
-
-    <button type="submit">Create account</button>
-  </form>
-
-  <p class="auth-switch">Already have an account? <a href="/login">Sign in</a></p>
-</main>
+  <button type="submit" class="auth-submit">Create account</button>
+</form>
+<p class="auth-switch">Already have an account? <a href="/login">Sign in</a></p>
 {% endblock %}

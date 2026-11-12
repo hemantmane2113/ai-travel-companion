@@ -11,6 +11,7 @@ function escapeHtml(text) {
 
 function inline(text) {
   return text
+    .replace(/&lt;br\s*\/?&gt;/g, "<br>") // models write <br> inside table cells
     .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")

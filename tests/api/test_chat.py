@@ -49,6 +49,19 @@ async def test_second_turn_sends_history_to_the_model(client, llm):
     ]
 
 
+async def test_history_is_trimmed_to_the_character_budget(client, llm, app):
+    app.state.settings.history_char_budget = 300
+    conversation_id = await _new_conversation(client)
+    for index in range(4):
+        llm.queue(say(f"Answer {index} " + "x" * 80))
+        await client.post(f"/api/conversations/{conversation_id}/chat", json={"message": f"Question {index}"})
+
+    sent = llm.calls[-1]["messages"]
+    # Oldest turns are dropped whole, and the window still opens on a user message.
+    assert [m["content"] for m in sent if m["role"] == "user"] == ["Question 2", "Question 3"]
+    assert sent[1] == {"role": "user", "content": "Question 2"}
+
+
 async def test_cannot_read_or_post_to_another_users_conversation(client, other_client, llm):
     conversation_id = await _new_conversation(client)
 

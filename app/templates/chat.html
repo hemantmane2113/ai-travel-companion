@@ -1,40 +1,77 @@
 {% extends "base.html" %}
 {% block body_class %}chat{% endblock %}
+{% block body_data %} data-map-tiles="{{ map_tiles_url }}" data-map-attribution="{{ map_tiles_attribution }}"{% endblock %}
+{% set who = user.display_name or user.email %}
 {% block body %}
 <div class="layout">
   <aside class="sidebar" id="sidebar">
-    <div class="brand">Travel Companion</div>
-    <button type="button" class="new-chat" id="new-chat">New trip</button>
-    <nav aria-label="Conversations"><ul class="conversations" id="conversations"></ul></nav>
+    <div class="brand">{% include "_logo.html" %}<span>Travel Companion</span></div>
+    <button type="button" class="new-chat" id="new-chat">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+      New Plan
+    </button>
+    <p class="sidebar-label" id="trips-label">Your trips</p>
+    <nav aria-labelledby="trips-label"><ul class="conversations" id="conversations"></ul></nav>
+    {% include "_theme_switch.html" %}
     <div class="account">
-      <span class="account-email" title="{{ user.email }}">{{ user.email }}</span>
-      <form method="post" action="/logout"><button type="submit" class="link-button">Sign out</button></form>
+      <span class="avatar" aria-hidden="true">{{ who[:1] | upper }}</span>
+      <span class="account-who">
+        <span class="account-name" title="{{ who }}">{{ who }}</span>
+        {% if user.display_name %}<span class="account-email" title="{{ user.email }}">{{ user.email }}</span>{% endif %}
+      </span>
+      <form method="post" action="/logout">
+        <button type="submit" class="icon-button" aria-label="Sign out" title="Sign out">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4h3a2 2 0 012 2v12a2 2 0 01-2 2h-3M10 17l5-5-5-5M15 12H4"/></svg>
+        </button>
+      </form>
     </div>
   </aside>
 
   <main class="main">
     <header class="topbar">
-      <button type="button" class="menu-button" id="menu-button" aria-label="Show conversations" aria-expanded="false">☰</button>
-      <h1 id="chat-title">New trip</h1>
+      <button type="button" class="menu-button icon-button" id="menu-button" aria-label="Show your trips" aria-expanded="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+      </button>
+      <h1 id="chat-title">New Plan</h1>
     </header>
 
     <div class="messages" id="messages" aria-live="polite">
       <div class="empty" id="empty">
-        <h2>Where are you going?</h2>
-        <p>Ask a question about a place, or tell me your destination and dates and I will plan the trip with you.</p>
+        <p class="empty-kicker">Hello{% if user.display_name %}, {{ user.display_name.split(' ')[0] }}{% endif %}</p>
+        <h2>Where to next?</h2>
+        <p class="empty-tagline">“Everything you wish you knew before you travelled.”</p>
+        <p class="empty-sub"><strong>I plan, you travel.</strong> Tell me where and when you are going, who is coming and your budget, and I will take care of the rest.</p>
         <div class="suggestions">
-          <button type="button" class="suggestion">I am visiting Delhi from 12 Sept to 15 Sept. Plan a trip for me.</button>
-          <button type="button" class="suggestion">What is the story behind the Red Fort, and is it worth a visit?</button>
-          <button type="button" class="suggestion">Compare hotels near Karol Bagh in Delhi.</button>
+          <button type="button" class="suggestion" data-template="Plan a trip to [destination] from [dates] for [number of people]. Budget: [amount]. We like [interests].">
+            <span class="suggestion-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M9 4L3 6v14l6-2 6 2 6-2V4l-6 2-6-2zM9 4v14M15 6v14"/></svg></span>
+            <span class="suggestion-text"><strong>Plan a trip</strong><span>Day-by-day plan for your dates and budget</span></span>
+          </button>
+          <button type="button" class="suggestion" data-template="Find good [cuisine or dish] restaurants near me.">
+            <span class="suggestion-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 21s-7-6.2-7-11.5A7 7 0 0112 2.5a7 7 0 017 7C19 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/></svg></span>
+            <span class="suggestion-text"><strong>Eat nearby</strong><span>Restaurants around you, on a map</span></span>
+          </button>
+          <button type="button" class="suggestion" data-template="Tell me the story of [place] and whether it is worth a visit.">
+            <span class="suggestion-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 21h18M5 21V10M19 21V10M9 21v-6h6v6M3 10l9-6 9 6"/></svg></span>
+            <span class="suggestion-text"><strong>Discover a place</strong><span>History, stories and why to go</span></span>
+          </button>
+          <button type="button" class="suggestion" data-template="Find hotels in [city] from [check-in date] to [check-out date] for [number of adults], under [amount] a night.">
+            <span class="suggestion-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 18V7M3 13h18v5M21 18v-3a3 3 0 00-3-3h-7v1M7 10.5a1.5 1.5 0 100-.01"/></svg></span>
+            <span class="suggestion-text"><strong>Stay on a budget</strong><span>Hotels within your nightly budget</span></span>
+          </button>
         </div>
       </div>
     </div>
 
-    <form class="composer" id="composer">
-      <label class="visually-hidden" for="input">Message</label>
-      <textarea id="input" rows="1" maxlength="4000" placeholder="Ask about a place or describe your trip" required></textarea>
-      <button type="submit" id="send">Send</button>
-    </form>
+    <div class="composer-wrap">
+      <form class="composer" id="composer">
+        <label class="visually-hidden" for="input">Message</label>
+        <textarea id="input" rows="1" maxlength="4000" placeholder="Where are you headed?" required></textarea>
+        <button type="submit" id="send" class="send-button" aria-label="Send">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+        </button>
+      </form>
+      <p class="composer-hint" id="composer-hint" aria-live="polite">Enter to send · Shift + Enter for a new line</p>
+    </div>
   </main>
 </div>
 <script src="{{ url_for('static', path='chat.js') }}" type="module"></script>

@@ -1,23 +1,18 @@
-{% extends "base.html" %}
+{% extends "auth_base.html" %}
 {% block title %}Sign in · Travel Companion{% endblock %}
-{% block body_class %}auth{% endblock %}
-{% block body %}
-<main class="auth-card">
-  <h1>Travel Companion</h1>
-  <p class="auth-sub">Sign in to plan your trip.</p>
+{% block auth_heading %}
+<h1>Welcome back</h1>
+<p class="auth-sub">Sign in to pick up your trips where you left them.</p>
+{% endblock %}
+{% block auth_form %}
+<form method="post" action="/login" class="auth-form">
+  <label for="email">Email</label>
+  <input id="email" name="email" type="email" autocomplete="email" value="{{ email or '' }}" required{% if not sign_in_buttons %} autofocus{% endif %}>
 
-  {% if error %}<p class="auth-error" role="alert">{{ error }}</p>{% endif %}
+  <label for="password">Password</label>
+  <input id="password" name="password" type="password" autocomplete="current-password" required>
 
-  <form method="post" action="/login">
-    <label for="email">Email</label>
-    <input id="email" name="email" type="email" autocomplete="email" value="{{ email or '' }}" required autofocus>
-
-    <label for="password">Password</label>
-    <input id="password" name="password" type="password" autocomplete="current-password" required>
-
-    <button type="submit">Sign in</button>
-  </form>
-
-  <p class="auth-switch">New here? <a href="/register">Create an account</a></p>
-</main>
+  <button type="submit" class="auth-submit">Sign in</button>
+</form>
+<p class="auth-switch">New here? <a href="/register">Create an account</a></p>
 {% endblock %}

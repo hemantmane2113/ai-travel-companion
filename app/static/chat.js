@@ -14,6 +14,10 @@ const menuButton = document.getElementById("menu-button");
 let conversations = [];
 let activeId = null;
 let busy = false;
+// The traveller's position, once they share it. Kept in this page only (never in
+// storage) and sent only with the message that shares it.
+let lastLocation = null;
+const LOCATION_MAX_AGE_MS = 10 * 60 * 1000;
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -59,7 +63,7 @@ function clearMessages() {
 
 function startNewConversation() {
   activeId = null;
-  titleEl.textContent = "New trip";
+  titleEl.textContent = "New Plan";
   clearMessages();
   showEmpty(true);
   renderConversations();
@@ -109,7 +113,13 @@ function addMessage(role, text) {
 }
 
 function addCard(card) {
-  const node = renderCard(card, { send: sendMessage });
+  // Booking cards fill in after a fetch, so they report when they have grown.
+  const node = renderCard(card, {
+    send: sendMessage,
+    painted: scrollToEnd,
+    shareLocation,
+    currentLocation: () => lastLocation,
+  });
   if (node) messagesEl.append(node);
 }
 
@@ -142,7 +152,8 @@ function setStatus(text) {
 function setBusy(value) {
   busy = value;
   sendButton.disabled = value;
-  sendButton.textContent = value ? "Working…" : "Send";
+  sendButton.classList.toggle("working", value);
+  sendButton.setAttribute("aria-label", value ? "Working…" : "Send");
 }
 
 async function ensureConversation() {
@@ -159,8 +170,82 @@ async function ensureConversation() {
   return true;
 }
 
-async function sendMessage(text) {
+// What the server should know about this browser: the traveller's own timezone (so
+// "today" is their date), and their position when they chose to share it.
+function clientInfo(extra = {}) {
+  let timezone = null;
+  try {
+    timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || null;
+  } catch {
+    timezone = null;
+  }
+  return { timezone, ...extra };
+}
+
+function currentPosition() {
+  return new Promise((resolve, reject) => {
+    if (!("geolocation" in navigator)) {
+      reject(new Error("unsupported"));
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(resolve, reject, {
+      enableHighAccuracy: true,
+      timeout: 15000,
+      maximumAge: 60000,
+    });
+  });
+}
+
+// Phrases that mean "where I am now". Recognised here so the browser can be asked at
+// once, without waiting on the model; anything missed still gets a share button.
+const NEAR_ME =
+  /\b(near|around|close to|closest to|nearest to)\s+(me|us|here|my location)\b|\bnear ?by\b|\baround here\b/i;
+
+// The browser's position, or null (with a notice) if it could not be had.
+async function locate() {
+  let position;
+  try {
+    position = await currentPosition();
+  } catch (error) {
+    const denied = error && error.code === 1;
+    addNotice(
+      denied
+        ? "Location was not shared. You can allow it in the browser's site settings, or just name the area."
+        : "Your location could not be found. Try again, or name the area instead."
+    );
+    return null;
+  }
+  lastLocation = {
+    latitude: position.coords.latitude,
+    longitude: position.coords.longitude,
+    accuracy_m: position.coords.accuracy,
+  };
+  setTimeout(() => {
+    lastLocation = null;
+  }, LOCATION_MAX_AGE_MS);
+  return lastLocation;
+}
+
+// Asked for by a "Share my location" card. Returns whether it was shared.
+async function shareLocation() {
+  if (busy) return false;
+  const location = await locate();
+  if (!location) return false;
+  await sendMessage("Here is my location.", { location });
+  return true;
+}
+
+async function sendMessage(text, extra = {}) {
   if (busy || !text.trim()) return;
+  if (!extra.location && NEAR_ME.test(text) && "geolocation" in navigator) {
+    // The browser shows its own permission prompt the first time.
+    busy = true;
+    setStatus("Getting your location…");
+    const location = await locate();
+    setStatus("");
+    busy = false;
+    if (location) extra = { ...extra, location };
+  }
   setBusy(true);
   showEmpty(false);
   addMessage("user", text);
@@ -199,7 +284,7 @@ async function sendMessage(text) {
     if (!(await ensureConversation())) return;
     const response = await api(`/api/conversations/${activeId}/chat`, {
       method: "POST",
-      body: JSON.stringify({ message: text }),
+      body: JSON.stringify({ message: text, client: clientInfo(extra) }),
     });
     if (!response.ok) {
       addNotice(await errorMessage(response));
@@ -234,7 +319,16 @@ async function sendMessage(text) {
 
 function autosize() {
   input.style.height = "auto";
-  input.style.height = `${Math.min(input.scrollHeight, 180)}px`;
+  // scrollHeight excludes the 1px borders that the border-box height includes.
+  input.style.height = `${Math.min(input.scrollHeight + 2, 180)}px`;
+}
+
+const composerHint = document.getElementById("composer-hint");
+const DEFAULT_HINT = composerHint.textContent;
+
+function resetHint() {
+  composerHint.textContent = DEFAULT_HINT;
+  composerHint.classList.remove("hint-alert");
 }
 
 function closeSidebar() {
@@ -246,12 +340,22 @@ composer.addEventListener("submit", (event) => {
   event.preventDefault();
   const text = input.value;
   if (busy || !text.trim()) return;
+  if (hasBlank(text)) {
+    composerHint.textContent = "Fill in the parts in [brackets] first, or delete them. Tab jumps to the next one.";
+    composerHint.classList.add("hint-alert");
+    selectBlank();
+    return;
+  }
+  resetHint();
   input.value = "";
   autosize();
   sendMessage(text);
 });
 
-input.addEventListener("input", autosize);
+input.addEventListener("input", () => {
+  autosize();
+  if (!hasBlank(input.value)) resetHint();
+});
 input.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
@@ -268,8 +372,56 @@ menuButton.addEventListener("click", () => {
   menuButton.setAttribute("aria-expanded", String(open));
 });
 
+// Links to other sites must never replace this page: an embedded browser may ignore
+// target="_blank" or refuse the new tab, and then the conversation is lost. They are
+// opened here instead, and if no tab can be opened the link is copied for the traveller.
+document.addEventListener("click", (event) => {
+  const link = event.target.closest("a[href]");
+  if (!link || event.defaultPrevented || event.button !== 0) return;
+  const url = new URL(link.href, window.location.href);
+  if (url.origin === window.location.origin) return;
+  event.preventDefault();
+  const opened = window.open(url.href, "_blank");
+  if (opened) {
+    opened.opener = null;
+    return;
+  }
+  const copy = navigator.clipboard ? navigator.clipboard.writeText(url.href) : Promise.reject();
+  copy
+    .then(() => addNotice(`Your browser blocked the new tab, so the link was copied. Paste it into a new tab: ${url.host}`))
+    .catch(() => addNotice(`Your browser blocked the new tab. Open this link in a new tab: ${url.href}`));
+});
+
+// ---------- start-screen templates ----------
+
+// A tile puts a question with [blanks] in the message box for the traveller to finish;
+// it never sends someone else's example on their behalf.
+const BLANK = /\[[^\]\n]+\]/g;
+const hasBlank = (text) => /\[[^\]\n]+\]/.test(text);
+
+// Selects the first blank at or after `from` (wrapping round). Returns whether one was found.
+function selectBlank(from = 0) {
+  const blanks = [...input.value.matchAll(BLANK)];
+  if (!blanks.length) return false;
+  const next = blanks.find((match) => match.index >= from) || blanks[0];
+  input.focus();
+  input.setSelectionRange(next.index, next.index + next[0].length);
+  return true;
+}
+
 document.querySelectorAll(".suggestion").forEach((button) => {
-  button.addEventListener("click", () => sendMessage(button.textContent));
+  button.addEventListener("click", () => {
+    input.value = button.dataset.template;
+    autosize();
+    if (!selectBlank()) input.focus();
+  });
+});
+
+input.addEventListener("keydown", (event) => {
+  // Tab moves between blanks while any are left; otherwise it moves focus as usual.
+  if (event.key !== "Tab" || event.shiftKey || !hasBlank(input.value)) return;
+  event.preventDefault();
+  selectBlank(input.selectionEnd);
 });
 
 (async function init() {

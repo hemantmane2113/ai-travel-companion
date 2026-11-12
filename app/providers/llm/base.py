@@ -8,6 +8,27 @@ class LLMError(Exception):
     """The LLM provider failed. The message is safe to show to the user."""
 
 
+class LLMToolCallError(LLMError):
+    """The model produced a tool call the provider rejected as malformed."""
+
+    def __init__(self, reason: str, failed_generation: str = ""):
+        super().__init__("The AI service could not complete that step. Try again.")
+        self.reason = reason
+        self.failed_generation = failed_generation
+
+
+class LLMRequestTooLarge(LLMError):
+    """The request is bigger than the service accepts at once."""
+
+
+class LLMRateLimited(LLMError):
+    """The service will not take this request until `retry_after` seconds have passed."""
+
+    def __init__(self, message: str, retry_after: float):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 @dataclass
 class ToolCall:
     id: str
@@ -17,6 +38,13 @@ class ToolCall:
 
 @dataclass
 class TextDelta:
+    text: str
+
+
+@dataclass
+class Notice:
+    """Something the traveller should see while waiting, e.g. a rate-limit pause."""
+
     text: str
 
 
@@ -54,5 +82,5 @@ class LLMProvider(ABC):
     @abstractmethod
     def stream(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None
-    ) -> AsyncIterator[TextDelta | Completion]:
-        """Yield TextDeltas as they arrive, then exactly one Completion."""
+    ) -> AsyncIterator[TextDelta | Notice | Completion]:
+        """Yield TextDeltas (and any Notices) as they arrive, then exactly one Completion."""
